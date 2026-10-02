@@ -1,9 +1,9 @@
 """Short recorded cues for what a relayed coding agent is doing.
 
-The relays speak an agent's final reply. While it works - searching,
-reading, running tests - narrating each step would always lag (every
-spoken line costs seconds of translation and synthesis), so instead a
-phase change plays one pre-recorded clip, instantly:
+The relays speak an agent's final reply, and its own one-line notes
+between steps ("Now running the tests.") while they are fresh. Individual
+tool calls are too frequent to speak - every spoken line costs seconds of
+translation and synthesis - so a phase change plays one recorded clip:
 
     begin      first tool call of a turn        "Beginning analysis."
     working    still at it, gaps doubling       "Analysing."
@@ -21,7 +21,8 @@ import re
 import time
 
 CONFIG = Path(__file__).resolve().parents[2] / 'progress_cues.json'
-DEFAULTS = {'enabled': True, 'interval_seconds': 45}
+# enabled: the recorded cues. narrate: speaking the agents' between-steps notes.
+DEFAULTS = {'enabled': True, 'narrate': True, 'interval_seconds': 45}
 
 # A record older than this is history - typically a backlog read after a
 # reply finished being spoken - and must not fire a cue now.
@@ -66,7 +67,11 @@ class CueTracker:
         ('tool', call_id, command)  a tool call; command is the shell text or None
         ('result', call_id, ok)     its result; ok is True, False or None (unknown)
         ('ask',)                    the agent is asking Master something
+        ('narration',)              the agent wrote a between-steps note
         ('done',)                   the turn's final reply arrived
+
+    'narrate' comes back for a fresh note when narration is on; the relay
+    speaks the note itself, and that holds back begin/working cues.
     """
 
     def __init__(self, config_path=CONFIG, clock=time.time):
@@ -85,7 +90,12 @@ class CueTracker:
         now = self.clock()
         if not cfg.get('enabled') or (timestamp and record_age(timestamp, now) > STALE_SECONDS):
             return None
-        urgent = cue in ('needs_you', 'failed', 'succeeded')
+        if cue == 'narrate':
+            if not cfg.get('narrate', True):
+                return None
+            # A spoken note already says the turn is under way.
+            self.started = True
+        urgent = cue in ('needs_you', 'failed', 'succeeded', 'narrate')
         if not urgent and now - self.last_cue < MIN_GAP_SECONDS:
             return None
         if cue == 'working':
@@ -110,6 +120,8 @@ class CueTracker:
             return None
         if kind == 'ask':
             return 'needs_you'
+        if kind == 'narration':
+            return 'narrate'
         if kind == 'tool':
             _, call_id, command = event
             if command and TEST_COMMAND.search(command):

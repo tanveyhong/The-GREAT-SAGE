@@ -1,14 +1,9 @@
-"""Read completed replies from the newest Claude desktop session, without driving Claude."""
-import json
-import logging
+"""Voice every Claude desktop session as it works, without driving Claude."""
 from pathlib import Path
-import threading
-import time
 
-from great_sage.core.codex_voice import new_records, opener, speech_text
-from great_sage.core.progress_cues import CueTracker
+from great_sage.core.session_relay import (
+    Parsed, SessionRelay, load_json_config, toggle_main)
 
-log = logging.getLogger(__name__)
 CONFIG = Path(__file__).resolve().parents[2] / 'claude_voice.json'
 DEFAULTS = {
     'enabled': True,
@@ -16,6 +11,10 @@ DEFAULTS = {
     'entrypoint': 'claude-desktop',  # '' speaks CLI sessions too.
     'max_chars': 6000,
 }
+
+# Tools that stop and wait for Master's answer.
+_ASKING_TOOLS = {'AskUserQuestion', 'ExitPlanMode'}
+_SHELL_TOOLS = {'Bash', 'PowerShell'}
 
 
 def user_prompt(record):
@@ -31,11 +30,6 @@ def user_prompt(record):
     if not isinstance(content, str) or not content.strip() or content.lstrip().startswith('<'):
         return None
     return content.strip()
-
-
-# Tools that stop and wait for Master's answer.
-_ASKING_TOOLS = {'AskUserQuestion', 'ExitPlanMode'}
-_SHELL_TOOLS = {'Bash', 'PowerShell'}
 
 
 def tool_events(record):
@@ -61,154 +55,105 @@ def tool_events(record):
     return events
 
 
-def completed_reply(record, entrypoint='claude-desktop'):
+def _short(text, limit=60):
+    text = ' '.join(str(text).split())
+    return text if len(text) <= limit else text[:limit - 1] + '…'
+
+
+def _base(path):
+    return Path(str(path)).name if path else ''
+
+
+def tool_steps(record):
+    """'Editing WorkflowService.php'-style labels for the activity line."""
+    if record.get('isSidechain') or record.get('type') != 'assistant':
+        return []
+    content = (record.get('message') or {}).get('content')
+    steps = []
+    for block in content if isinstance(content, list) else ():
+        if not isinstance(block, dict) or block.get('type') != 'tool_use':
+            continue
+        name, args = block.get('name', ''), block.get('input') or {}
+        if name in _SHELL_TOOLS:
+            steps.append(_short(args.get('description') or 'Running ' + str(args.get('command', ''))))
+        elif name == 'Read':
+            steps.append('Reading ' + _base(args.get('file_path')))
+        elif name in ('Edit', 'MultiEdit', 'NotebookEdit'):
+            steps.append('Editing ' + _base(args.get('file_path') or args.get('notebook_path')))
+        elif name == 'Write':
+            steps.append('Writing ' + _base(args.get('file_path')))
+        elif name == 'Grep':
+            steps.append(_short(f"Searching '{args.get('pattern', '')}'"))
+        elif name == 'Glob':
+            steps.append(_short('Finding ' + str(args.get('pattern', ''))))
+        elif name in ('WebSearch', 'WebFetch'):
+            steps.append('Searching the web')
+        elif name in ('Agent', 'Task'):
+            steps.append(_short('Sub-agent: ' + str(args.get('description', ''))))
+        elif name not in _ASKING_TOOLS:
+            steps.append(_short(name.replace('mcp__', '').replace('__', ' ')))
+    return steps
+
+
+def _assistant_text(record, stop_reason):
     message = record.get('message') or {}
     if (record.get('type') != 'assistant' or record.get('isSidechain')
-            or message.get('stop_reason') != 'end_turn'
+            or message.get('stop_reason') != stop_reason
             or message.get('model') == '<synthetic>'):
-        return None  # Tool-call narration, sub-agents, and local error stubs.
-    if entrypoint and record.get('entrypoint') != entrypoint:
-        return None
+        return None  # Sub-agents and local error stubs never speak.
     content = message.get('content')
     if isinstance(content, str):
         text = content
     else:
         text = '\n\n'.join(block.get('text', '') for block in content or ()
                            if isinstance(block, dict) and block.get('type') == 'text')
-    if not text.strip():
+    return text if text.strip() else None
+
+
+def completed_reply(record, entrypoint='claude-desktop'):
+    """(id, text) for a turn's final reply."""
+    if entrypoint and record.get('entrypoint') != entrypoint:
         return None
-    return record.get('uuid') or message.get('id'), text
+    text = _assistant_text(record, 'end_turn')
+    if text is None:
+        return None
+    return record.get('uuid') or (record.get('message') or {}).get('id'), text
+
+
+def narration(record):
+    """The note Claude writes just before a tool call ("Now running the tests.")."""
+    return _assistant_text(record, 'tool_use')
 
 
 def load_config(path=CONFIG):
-    try:
-        cfg = json.loads(Path(path).read_text(encoding='utf-8-sig'))
-    except (OSError, ValueError):
-        cfg = {}
-    return {**DEFAULTS, **cfg}
+    return load_json_config(path, DEFAULTS)
 
 
-def _created(stat):
-    return getattr(stat, 'st_birthtime', stat.st_ctime)
+class ClaudeVoiceRelay(SessionRelay):
+    name = 'Claude'
 
+    def __init__(self, speak, config_path=CONFIG, cue=None, narrate=None, activity=None):
+        super().__init__(speak, config_path, cue=cue, narrate=narrate, activity=activity)
 
-class ClaudeVoiceRelay:
-    def __init__(self, speak, config_path=CONFIG, cue=None):
-        self.speak = speak
-        self.cue = cue  # Plays a progress cue by name; see progress_cues.
-        self.cues = CueTracker()
-        self.config_path = Path(config_path)
-        self.stop_event = threading.Event()
-        self.thread = threading.Thread(target=self.run, name='claude-voice-relay', daemon=True)
-        self.started = None
-        self.offsets = {}  # Per session file, so switching back never replays.
-        self.path = None
-        self.pending = []
-        self.seen = set()
-        self.last_prompt = None
+    def load_config(self):
+        return load_config(self.config_path)
 
-    def start(self):
-        self.thread.start()
-
-    def stop(self):
-        self.stop_event.set()
-
-    def clear(self):
-        self.pending.clear()
-
-    def sessions(self, cfg):
+    def session_files(self, cfg):
         # Top-level files only: sub-agent logs live in per-session folders.
         return Path(cfg['projects_dir']).glob('*/*.jsonl')
 
-    def newest(self, cfg):
-        best, best_mtime = None, None
-        for path in self.sessions(cfg):
-            try:
-                stat = path.stat()
-            except OSError:
-                continue
-            if path not in self.offsets:
-                # Sessions begun after startup are read from the top;
-                # older ones from their current end, never their history.
-                self.offsets[path] = 0 if _created(stat) >= self.started else stat.st_size
-            if best_mtime is None or stat.st_mtime > best_mtime:
-                best, best_mtime = path, stat.st_mtime
-        return best
-
-    def poll(self):
-        cfg = load_config(self.config_path)
-        if self.started is None:
-            self.started = time.time()
-            self.newest(cfg)  # Snapshot every existing session's end.
-            return
-        if not cfg.get('enabled'):
-            self.pending.clear()
-            self.newest(cfg)  # Keep offsets current so unmuting skips the gap.
-            for path in self.offsets:
-                try:
-                    self.offsets[path] = path.stat().st_size
-                except OSError:
-                    pass
-            return
-        path = self.newest(cfg)
-        if path is None:
-            return
-        if path != self.path:
-            self.path = path
-            log.info('Claude voice relay following session %s', path.stem)
-        if path.stat().st_size < self.offsets[path]:
-            self.offsets[path] = 0
-        for record, self.offsets[path] in new_records(path, self.offsets[path]):
-            try:
-                prompt = user_prompt(record)
-                if prompt:
-                    self.last_prompt = prompt
-                reply = completed_reply(record, cfg.get('entrypoint', ''))
-                entry = cfg.get('entrypoint', '')
-                if not entry or record.get('entrypoint') == entry:
-                    events = ([('prompt',)] if prompt else []) + tool_events(record)
-                    self._feed_cues(events + ([('done',)] if reply else []), record.get('timestamp'))
-            except AttributeError:
-                continue
-            if reply and reply[0] not in self.seen:
-                self.seen.add(reply[0])
-                spoken = speech_text(reply[1], cfg.get('max_chars', 6000))
-                if spoken:
-                    # The voice drops this when the reply already opens
-                    # with a clip phrase of its own.
-                    self.pending.append(f'{opener(self.last_prompt)} {spoken}')
-        if len(self.pending) > 1:
-            # Replies that piled up while one was spoken are stale by now.
-            log.info('Voice relay skipping %d older replies', len(self.pending) - 1)
-            del self.pending[:-1]
-        if self.pending and self.speak(self.pending[0]):
-            self.pending.pop(0)
-
-    def _feed_cues(self, events, timestamp):
-        for event in events:
-            name = self.cues.feed(event, timestamp)
-            if name and self.cue:
-                self.cue(name)
-
-    def run(self):
-        while not self.stop_event.is_set():
-            try:
-                self.poll()
-            except Exception:
-                log.exception('Claude voice relay failed; will retry')
-            self.stop_event.wait(0.75)
+    def parse(self, record, cfg):
+        entry = cfg.get('entrypoint', '')
+        # Messages carry where the session runs; other record kinds do not.
+        if entry and record.get('type') in ('user', 'assistant') and record.get('entrypoint') != entry:
+            return None
+        return Parsed(prompt=user_prompt(record),
+                      reply=completed_reply(record, ''),
+                      narration=narration(record),
+                      events=tool_events(record),
+                      steps=tool_steps(record),
+                      folder=record.get('cwd'))
 
 
 if __name__ == '__main__':
-    import argparse
-    parser = argparse.ArgumentParser()
-    switch = parser.add_mutually_exclusive_group(required=True)
-    switch.add_argument('--enable', action='store_true')
-    switch.add_argument('--disable', action='store_true')
-    args = parser.parse_args()
-    cfg = load_config()
-    cfg['enabled'] = args.enable
-    temporary = CONFIG.with_suffix('.tmp')
-    temporary.write_text(json.dumps(cfg, indent=2), encoding='utf-8')
-    temporary.replace(CONFIG)
-    print('Claude voice enabled.' if args.enable else 'Claude voice muted.')
+    toggle_main(CONFIG, DEFAULTS, 'Claude')

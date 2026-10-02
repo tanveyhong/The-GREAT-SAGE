@@ -920,7 +920,17 @@ async def run_server(engine, voice) -> None:
         with relay_speech_lock:
             return _speak_relayed_reply(text)
 
-    def _speak_relayed_reply(text):
+    # An agent's between-steps note. Only into a silence, like a cue: a
+    # note that has to wait is out of date by the time it could be heard.
+    def _speak_relay_narration(text):
+        if getattr(voice, 'speaking', False) or not relay_speech_lock.acquire(blocking=False):
+            return False
+        try:
+            return _speak_relayed_reply(text, narration=True)
+        finally:
+            relay_speech_lock.release()
+
+    def _speak_relayed_reply(text, narration=False):
         ws = active_connection['websocket']
         sink = active_connection['sink']
         if voice is None or ws is None or sink is None:
@@ -934,13 +944,16 @@ async def run_server(engine, voice) -> None:
         try:
             voice.set_sink(sink)
             send({'type': 'codex_voice_start'})
-            if hasattr(voice, 'speak_codex'):
+            if narration:
+                voice.speak(text)  # No opener, no summary: it is one line.
+            elif hasattr(voice, 'speak_codex'):
                 voice.speak_codex(text)
             elif hasattr(voice, 'speak_stream'):
                 voice.speak_stream(iter([text]))
             else:
                 voice.speak(text)
-            log.info('Voice relay finished speaking %d characters', len(text))
+            log.info('Voice relay finished speaking %d characters%s',
+                     len(text), ' of narration' if narration else '')
         except Exception:
             log.exception('Could not speak relayed reply')
             # Do not replay a partially spoken reply automatically.
@@ -970,10 +983,23 @@ async def run_server(engine, voice) -> None:
         finally:
             relay_speech_lock.release()
 
+    # The overlay's activity line: what each agent session is doing now.
+    # Every HUD/overlay page gets it, fire-and-forget - it is display only,
+    # and a relay thread must never wait on a slow or closing page.
+    def _send_activity(payload):
+        message = json.dumps(payload)
+        for ws_client in list(voice_clients):
+            try:
+                asyncio.run_coroutine_threadsafe(ws_client.send(message), loop)
+            except Exception:
+                pass
+
+    relay_hooks = dict(cue=_play_relay_cue, narrate=_speak_relay_narration,
+                       activity=_send_activity)
     from great_sage.core.codex_voice import CodexVoiceRelay
-    codex_voice_relay = CodexVoiceRelay(_speak_relay_reply, cue=_play_relay_cue)
+    codex_voice_relay = CodexVoiceRelay(_speak_relay_reply, **relay_hooks)
     from great_sage.core.claude_voice import ClaudeVoiceRelay
-    claude_voice_relay = ClaudeVoiceRelay(_speak_relay_reply, cue=_play_relay_cue)
+    claude_voice_relay = ClaudeVoiceRelay(_speak_relay_reply, **relay_hooks)
 
     # Every live connection that could receive a voice reply, by role.
     # Needed because the slot has to FALL BACK, not empty itself: closing

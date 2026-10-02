@@ -1585,6 +1585,49 @@ body.mini #mini-chat {
   overflow-wrap: break-word;
 }
 body.mini #mini-chat.show { display: block; opacity: 1; transform: none; }
+/* Activity line: what each Claude/Codex session is doing right now, one
+   row per session (newest first, two at most). It sits on the opposite
+   edge to the speech bubble - placeAgentActivity() picks the edge - and
+   never takes input, like the bubble. */
+#agent-activity { display: none; }
+body.mini #agent-activity {
+  position: fixed;
+  left: 6px; right: 56px;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  z-index: 46;
+  pointer-events: none;
+}
+body.mini #agent-activity .agent-row {
+  padding: 3px 7px 4px 8px;
+  background: rgba(4, 7, 12, 0.82);
+  border-left: 2px solid rgba(140, 200, 255, 0.9);
+  clip-path: polygon(0 0, calc(100% - 5px) 0, 100% 5px, 100% 100%, 0 100%);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.6);
+  opacity: 1;
+  transition: opacity 600ms ease;
+}
+body.mini #agent-activity .agent-row.idle { opacity: 0; }
+body.mini #agent-activity .agent-row[data-kind="ask"] { border-left-color: rgba(255, 196, 92, 0.95); }
+body.mini #agent-activity .agent-row[data-kind="result"][data-text="Tests failed"] { border-left-color: rgba(255, 110, 110, 0.95); }
+body.mini #agent-activity .agent-row[data-kind="done"] { border-left-color: rgba(120, 230, 160, 0.95); }
+body.mini #agent-activity .agent-head {
+  display: block;
+  font: 600 7.5px/1.2 "Segoe UI", sans-serif;
+  letter-spacing: 1.4px;
+  text-transform: uppercase;
+  color: rgba(150, 205, 255, 0.85);
+}
+body.mini #agent-activity .agent-text {
+  display: block;
+  font: 500 10px/1.35 "Segoe UI Variable Text", "Segoe UI", sans-serif;
+  color: #e6f1ff;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.8);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
 body.mini #mini-chat .mini-chat-label {
   display: block;
   margin-bottom: 3px;
@@ -1713,6 +1756,7 @@ body.mini:hover #mini-exit { opacity: 1; }
      triangle because it has to reach from the bubble back to the core at
      whatever angle the bubble ends up on. -->
 <svg id="mini-chat-link" class="mini-keep" aria-hidden="true"></svg>
+<div id="agent-activity" class="mini-keep" aria-live="polite"></div>
 <div id="mini-chat" class="mini-keep"><span class="mini-chat-label">大賢者</span><span id="mini-chat-text"></span></div>
 
 <div id="core-pole"></div>
@@ -5680,6 +5724,65 @@ const MINI_CHAT_PAD = 3;
     // Back to core-only, unless the menu is still open over it.
     setHostHitRegion(!!wheelOpen);
   }
+  // ---- Activity line --------------------------------------------------
+  // One row per agent session: its latest note or step. Rows go idle (fade)
+  // after AGENT_ACTIVITY_IDLE_MS without news and are dropped once faded.
+  const AGENT_ACTIVITY_IDLE_MS = 20000;
+  const AGENT_ACTIVITY_ROWS = 2;
+  const agentSessions = new Map();   // key -> { agent, session, kind, text, at }
+  let agentActivityTimer = null;
+
+  function placeAgentActivity(box) {
+    // Opposite edge to the bubble, using the same screen-half test as
+    // placeMiniChat: the bubble sits at the top when the overlay is in the
+    // lower half of the screen, so the activity line goes to the bottom.
+    let onBottom = false;
+    try {
+      const sh = window.screen.availHeight || window.screen.height;
+      onBottom = sh ? (window.screenY + window.innerHeight / 2) > sh / 2 : false;
+    } catch (err) { /* keep the top edge */ }
+    box.style.top = onBottom ? '' : '4px';
+    box.style.bottom = onBottom ? '4px' : '';
+  }
+
+  function renderAgentActivity() {
+    const box = document.getElementById('agent-activity');
+    if (!box) return;
+    const now = Date.now();
+    for (const [key, entry] of agentSessions) {
+      if (now - entry.at > AGENT_ACTIVITY_IDLE_MS + 1000) agentSessions.delete(key);
+    }
+    const rows = [...agentSessions.values()].sort((a, b) => b.at - a.at)
+      .slice(0, AGENT_ACTIVITY_ROWS);
+    box.textContent = '';
+    for (const item of rows) {
+      const row = document.createElement('div');
+      row.className = 'agent-row' + (now - item.at > AGENT_ACTIVITY_IDLE_MS ? ' idle' : '');
+      row.dataset.kind = item.kind;
+      row.dataset.text = item.text;
+      const head = document.createElement('span');
+      head.className = 'agent-head';
+      head.textContent = item.agent + ' · ' + item.session;
+      const text = document.createElement('span');
+      text.className = 'agent-text';
+      text.textContent = item.text;
+      row.append(head, text);
+      box.append(row);
+    }
+    placeAgentActivity(box);
+    clearTimeout(agentActivityTimer);
+    if (agentSessions.size) agentActivityTimer = setTimeout(renderAgentActivity, 1000);
+  }
+
+  window.__showAgentActivity = (msg) => {
+    if (!msg || !msg.text) return;
+    agentSessions.set(msg.key || (msg.agent + msg.session), {
+      agent: msg.agent || 'Agent', session: msg.session || '',
+      kind: msg.kind || 'step', text: msg.text, at: Date.now(),
+    });
+    renderAgentActivity();
+  };
+
   window.__showMiniChat = showMiniChat;
   window.__hideMiniChat = hideMiniChat;
   window.__placeMiniChat = placeMiniChat;
@@ -6699,6 +6802,8 @@ const MINI_CHAT_PAD = 3;
         saveChats();
         maybeNameChat(currentTopic());
       }
+    } else if (msg.type === 'agent_activity') {
+      if (window.__showAgentActivity) window.__showAgentActivity(msg);
     } else if (msg.type === 'stop_audio') {
       // The stop-speech key. Silence both speech elements now; the server
       // has already stopped waiting on their acks and sends speaking_done.

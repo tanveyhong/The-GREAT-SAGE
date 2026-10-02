@@ -1,14 +1,19 @@
-"""Read completed replies from one local Codex chat, without driving Codex."""
+"""Voice every Codex session as it works, without driving Codex."""
 import json
-import logging
 from pathlib import Path
 import re
-import threading
 
-from great_sage.voice.speakable import speakable, cap_for_speech
+from great_sage.core.session_relay import (  # noqa: F401 - re-exported
+    Parsed, SessionRelay, load_json_config, new_records, opener, speech_text, toggle_main)
 
-log = logging.getLogger(__name__)
 CONFIG = Path(__file__).resolve().parents[2] / 'codex_voice.json'
+DEFAULTS = {
+    'enabled': True,
+    'sessions_dir': str(Path.home() / '.codex' / 'sessions'),
+    # "all" voices every Codex chat; "pinned" only rollout_path's.
+    'follow': 'all',
+    'max_chars': 6000,
+}
 
 
 def completed_reply(record):
@@ -55,141 +60,91 @@ def tool_events(record):
     return []
 
 
+def tool_steps(record):
+    """'Running npm test'-style labels for the activity line."""
+    payload = record.get('payload') or {}
+    if record.get('type') != 'response_item' or payload.get('type') not in ('custom_tool_call', 'function_call'):
+        return []
+    name = payload.get('name', '')
+    if name in ('sleep', 'wait', 'request_user_input_async'):
+        return []
+    if name == 'apply_patch':
+        return ['Editing files']
+    source = payload.get('input') or payload.get('arguments') or ''
+    commands = _COMMAND.findall(source if isinstance(source, str) else '')
+    if not commands:
+        return ['Working']
+    text = ' '.join(commands[0].replace('\\"', '"').split())
+    return ['Running ' + (text if len(text) <= 56 else text[:55] + '…')]
+
+
+def folder(record):
+    """The chat's working folder, from its session and turn context records."""
+    if record.get('type') in ('session_meta', 'turn_context'):
+        return (record.get('payload') or {}).get('cwd')
+    return None
+
+
+def _message_text(payload):
+    return ' '.join(block.get('text', '') for block in payload.get('content') or ()
+                    if isinstance(block, dict)).strip()
+
+
 def user_prompt(record):
     """The text Master typed into Codex, or None for injected context."""
     payload = record.get('payload') or {}
     if (record.get('type') != 'response_item' or payload.get('type') != 'message'
             or payload.get('role') != 'user'):
         return None
-    text = ' '.join(block.get('text', '') for block in payload.get('content') or ()
-                    if isinstance(block, dict) and block.get('type') == 'input_text').strip()
+    text = _message_text(payload)
     # Environment context, app events and question replies arrive as tags.
     return text if text and not text.startswith('<') else None
 
 
-_QUESTION_START = re.compile(
-    r'^(what|why|how|is|are|was|were|can|could|does|do|did|should|which|who|'
-    r'where|when|will|would|shall|has|have)\b', re.IGNORECASE)
+def narration(record):
+    """Codex's between-steps notes are assistant messages in the
+    "commentary" phase; the reply itself is "final_answer"."""
+    payload = record.get('payload') or {}
+    if (record.get('type') != 'response_item' or payload.get('type') != 'message'
+            or payload.get('role') != 'assistant' or payload.get('phase') != 'commentary'):
+        return None
+    return _message_text(payload) or None
 
 
-def opener(prompt):
-    """Great Sage's two openers: 解 "Answer." for a question, else 告 "Notice."."""
-    if prompt and ('?' in prompt or _QUESTION_START.match(prompt)):
-        return 'Answer.'
-    return 'Notice.'
+def load_config(path=CONFIG):
+    return load_json_config(path, DEFAULTS)
 
 
-def speech_text(text, limit=6000):
-    # Coding stays visible in Codex; only prose is useful as spoken feedback.
-    text = re.sub(r'(?ms)^\s*(`{3,}|~{3,})[^\n]*\n.*?^\s*\1\s*$', '', text)
-    text = re.sub(r'(?m)^\s*::[^\n]*$', '', text)
-    return cap_for_speech(speakable(text), limit=max(100, min(int(limit), 20000)))
+class CodexVoiceRelay(SessionRelay):
+    name = 'Codex'
 
+    def __init__(self, speak, config_path=CONFIG, cue=None, narrate=None, activity=None):
+        super().__init__(speak, config_path, cue=cue, narrate=narrate, activity=activity)
 
-def new_records(path, offset):
-    """Yield (record, offset after it) for each complete JSON line past offset."""
-    with path.open('rb') as source:
-        source.seek(offset)
-        while True:
-            line = source.readline()
-            if not line.endswith(b'\n'):
-                return  # End of file, or the writer is mid-record.
-            try:
-                record = json.loads(line)
-            except ValueError:
-                record = {}
-            yield record, source.tell()
+    def load_config(self):
+        return load_config(self.config_path)
 
+    def session_files(self, cfg):
+        if cfg.get('follow') == 'pinned':
+            path = Path(cfg.get('rollout_path', ''))
+            return [path] if path.is_file() else []
+        return Path(cfg['sessions_dir']).rglob('rollout-*.jsonl')
 
-class CodexVoiceRelay:
-    def __init__(self, speak, config_path=CONFIG, cue=None):
-        from great_sage.core.progress_cues import CueTracker
-        self.speak = speak
-        self.cue = cue  # Plays a progress cue by name; see progress_cues.
-        self.cues = CueTracker()
-        self.config_path = Path(config_path)
-        self.stop_event = threading.Event()
-        self.thread = threading.Thread(target=self.run, name='codex-voice-relay', daemon=True)
-        self.path = None
-        self.offset = 0
-        self.pending = []
-        self.seen = set()
-        self.last_prompt = None
-
-    def start(self):
-        self.thread.start()
-
-    def stop(self):
-        self.stop_event.set()
-
-    def clear(self):
-        self.pending.clear()
-
-    def poll(self):
+    def initial_folder(self, path):
         try:
-            cfg = json.loads(self.config_path.read_text(encoding='utf-8-sig'))
-        except (OSError, ValueError):
-            return
-        path = Path(cfg.get('rollout_path', ''))
-        if not cfg.get('enabled') or not path.is_file():
-            self.pending.clear()
-            self.path = None
-            return
-        if path != self.path:
-            self.path = path
-            self.offset = path.stat().st_size
-            self.pending.clear()
-            self.seen.clear()
-            log.info('Codex voice relay attached to chat %s', cfg.get('thread_id', ''))
-            return  # Start at the end; never replay old chat history.
-        if path.stat().st_size < self.offset:
-            self.offset = 0
-        for record, self.offset in new_records(path, self.offset):
-            try:
-                prompt = user_prompt(record)
-                reply = completed_reply(record)
-            except AttributeError:
-                continue
-            if prompt:
-                self.last_prompt = prompt
-            events = ([('prompt',)] if prompt else []) + tool_events(record)
-            for event in events + ([('done',)] if reply else []):
-                name = self.cues.feed(event, record.get('timestamp'))
-                if name and self.cue:
-                    self.cue(name)
-            if reply and reply[0] not in self.seen:
-                self.seen.add(reply[0])
-                spoken = speech_text(reply[1], cfg.get('max_chars', 6000))
-                if spoken:
-                    # The voice drops this when the reply already opens
-                    # with a clip phrase of its own.
-                    self.pending.append(f'{opener(self.last_prompt)} {spoken}')
-        if len(self.pending) > 1:
-            # Replies that piled up while one was spoken are stale by now.
-            log.info('Voice relay skipping %d older replies', len(self.pending) - 1)
-            del self.pending[:-1]
-        if self.pending and self.speak(self.pending[0]):
-            self.pending.pop(0)
+            with path.open('rb') as source:
+                return folder(json.loads(source.readline()))
+        except (OSError, ValueError, AttributeError):
+            return None
 
-    def run(self):
-        while not self.stop_event.is_set():
-            try:
-                self.poll()
-            except Exception:
-                log.exception('Codex voice relay failed; will retry')
-            self.stop_event.wait(0.75)
+    def parse(self, record, cfg):
+        return Parsed(prompt=user_prompt(record),
+                      reply=completed_reply(record),
+                      narration=narration(record),
+                      events=tool_events(record),
+                      steps=tool_steps(record),
+                      folder=folder(record))
 
 
 if __name__ == '__main__':
-    import argparse
-    parser = argparse.ArgumentParser()
-    switch = parser.add_mutually_exclusive_group(required=True)
-    switch.add_argument('--enable', action='store_true')
-    switch.add_argument('--disable', action='store_true')
-    args = parser.parse_args()
-    cfg = json.loads(CONFIG.read_text(encoding='utf-8-sig'))
-    cfg['enabled'] = args.enable
-    temporary = CONFIG.with_suffix('.tmp')
-    temporary.write_text(json.dumps(cfg, indent=2), encoding='utf-8')
-    temporary.replace(CONFIG)
-    print('Codex voice enabled.' if args.enable else 'Codex voice muted.')
+    toggle_main(CONFIG, DEFAULTS, 'Codex')
