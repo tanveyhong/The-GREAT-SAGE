@@ -627,8 +627,10 @@ JAPANESE_TRANSLATE_NUM_CTX = 4096
 # How long the translator stays loaded after its last use. Every
 # translation and every prompt sent to Claude/Codex renews it, so it stays
 # warm while sessions are active and leaves once all have been quiet this
-# long. GAMING and SLEEP still unload it at once.
-JAPANESE_TRANSLATOR_KEEP_ALIVE_SECONDS = 600
+# long. 10 minutes held ~3GB of VRAM through quiet spells on an 8GB card
+# that was already full; 3 costs ~3s on the first reply after a longer one.
+# GAMING and SLEEP still unload it at once.
+JAPANESE_TRANSLATOR_KEEP_ALIVE_SECONDS = 180
 # Optional {"English": "カタカナ"} additions to the built-in glossary.
 JAPANESE_GLOSSARY_PATH = "voice_glossary.json"
 # Relayed Claude/Codex replies longer than this (characters of prose) are

@@ -39,6 +39,9 @@ STREAM_CHUNK_TOKENS = 20
 PIECE_GAP = np.zeros(int(0.1 * RATE), dtype=np.float32)   # between XTTS pieces
 CACHED_CHUNK = int(0.5 * RATE)          # cached audio is re-sent in this size
 STREAM_TAIL_SECONDS = 0.3               # silence that lets the reverb ring out
+# How far synthesis may run ahead of playback. Enough to ride out a slow
+# chunk or a translation, little enough that the GPU works at a steady pace.
+PACE_AHEAD_SECONDS = 3.0
 
 
 # Agents repeat themselves - "Now running the tests.", the same openers -
@@ -303,6 +306,15 @@ class JapaneseVoiceOutput(F5TTSVoiceOutput):
                 log.info('Japanese voice: first audio %.1fs after the reply arrived',
                          state['first'] - began)
             state['sent'] += len(samples) / RATE
+            # Pace the GPU: once PACE_AHEAD_SECONDS of audio is queued in the
+            # page, wait for playback to catch up before generating more.
+            # Flat out, XTTS ran far faster than realtime and then idled - a
+            # tall spike in GPU load; paced, the same work is a low plateau.
+            while not final and not self._stop_requested:
+                ahead = state['sent'] - (time.monotonic() - state['first'])
+                if ahead <= PACE_AHEAD_SECONDS:
+                    break
+                time.sleep(min(ahead - PACE_AHEAD_SECONDS, 0.25))
 
         def send_held(held):
             for path, words in held:
