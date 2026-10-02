@@ -1620,10 +1620,15 @@ body.mini #agent-activity .agent-row[data-kind="done"] { border-left-color: rgba
    and a thin glowing cue line drawn out from the centre as a line enters.
    These override the bubble rules above (same specificity, later). */
 body.mini #mini-chat {
-  left: 10px; right: 10px; bottom: 10px; top: auto;
+  left: 4px; right: 4px; bottom: 6px; top: auto;
   max-width: none;
-  padding: 0 2px 4px;
-  background: none;
+  padding: 10px 14px 9px;
+  /* A cinematic shade, not a panel: dark at the centre, fully clear at the
+     edges, so the words read on a white page without a visible box. The
+     overlay's Chromium (102) cannot outline text with paint-order, so the
+     shade and the eight-way shadow below do that job. */
+  background: radial-gradient(ellipse at 50% 55%, rgba(0, 0, 0, 0.62) 0%,
+                              rgba(0, 0, 0, 0.42) 42%, rgba(0, 0, 0, 0) 72%);
   border: 0;
   clip-path: none;
   box-shadow: none;
@@ -1631,8 +1636,10 @@ body.mini #mini-chat {
   font: 600 12.5px/1.38 "Segoe UI Variable Text", "Segoe UI", sans-serif;
   letter-spacing: 0.1px;
   color: #ffffff;
-  text-shadow: 0 0 1px #000, 0 0 2px #000, 0 1px 3px rgba(0, 0, 0, 0.95),
-               0 0 9px rgba(0, 0, 0, 0.75);
+  text-shadow:
+    1px 0 0 #000, -1px 0 0 #000, 0 1px 0 #000, 0 -1px 0 #000,
+    1px 1px 0 #000, -1px -1px 0 #000, 1px -1px 0 #000, -1px 1px 0 #000,
+    0 2px 6px rgba(0, 0, 0, 0.9), 0 0 12px rgba(0, 0, 0, 0.6);
 }
 body.mini #mini-chat .mini-chat-label {
   display: block;
@@ -1640,8 +1647,10 @@ body.mini #mini-chat .mini-chat-label {
   text-align: center;
   font: 700 7.5px/1 "Segoe UI", sans-serif;
   letter-spacing: 2.2px;
-  color: rgba(150, 205, 255, 0.95);
-  text-shadow: 0 0 2px #000, 0 0 6px rgba(0, 0, 0, 0.9), 0 0 8px rgba(120, 190, 255, 0.5);
+  color: rgba(165, 215, 255, 1);
+  text-shadow:
+    1px 0 0 #000, -1px 0 0 #000, 0 1px 0 #000, 0 -1px 0 #000,
+    0 0 6px rgba(0, 0, 0, 0.95);
 }
 @keyframes subtitleCue {
   0%   { transform: scaleX(0); opacity: 0; }
