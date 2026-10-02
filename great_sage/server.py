@@ -951,10 +951,29 @@ async def run_server(engine, voice) -> None:
                 pass
         return True
 
+    # A progress cue is a single recorded clip, and only ever fills a
+    # silence: one that arrives while anything is being said is dropped,
+    # never queued, because by the time it could play it would be stale.
+    def _play_relay_cue(name):
+        path = getattr(settings, "PROGRESS_CUE_CLIPS", {}).get(name)
+        sink = active_connection['sink']
+        if not path or sink is None or voice is None or getattr(voice, 'speaking', False):
+            return
+        if not relay_speech_lock.acquire(blocking=False):
+            return
+        try:
+            sink.pending_text = None  # A cue carries no caption.
+            sink.play_file(path)
+            log.info('Progress cue: %s', name)
+        except Exception as exc:
+            log.info('Progress cue %s skipped: %s', name, exc)
+        finally:
+            relay_speech_lock.release()
+
     from great_sage.core.codex_voice import CodexVoiceRelay
-    codex_voice_relay = CodexVoiceRelay(_speak_relay_reply)
+    codex_voice_relay = CodexVoiceRelay(_speak_relay_reply, cue=_play_relay_cue)
     from great_sage.core.claude_voice import ClaudeVoiceRelay
-    claude_voice_relay = ClaudeVoiceRelay(_speak_relay_reply)
+    claude_voice_relay = ClaudeVoiceRelay(_speak_relay_reply, cue=_play_relay_cue)
 
     # Every live connection that could receive a voice reply, by role.
     # Needed because the slot has to FALL BACK, not empty itself: closing

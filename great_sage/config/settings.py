@@ -629,6 +629,16 @@ JAPANESE_SUMMARY_SENTENCES = 3
 # for 5.7s of audio) on the RTX 5060. Weights stay fp32 - converting them
 # breaks XTTS's layer norms - so it saves time, not VRAM.
 JAPANESE_AUTOCAST = True
+# Clips for what a relayed Claude/Codex session is doing while it works
+# (great_sage/core/progress_cues.py). progress_cues.json switches them on
+# and off and sets how often "Analysing." may repeat.
+PROGRESS_CUE_CLIPS = {
+    "begin": os.path.join("voice_lines", "kaiseki_kaishi.ogg"),        # Beginning analysis.
+    "working": os.path.join("voice_lines", "kaiseki_chuu.ogg"),        # Analysing.
+    "succeeded": os.path.join("voice_lines", "seiko_shimashita.ogg"),  # Succeeded.
+    "failed": os.path.join("voice_lines", "shippai_shimashita.ogg"),   # Failed.
+    "needs_you": os.path.join("voice_lines", "koku.ogg"),              # Notice.
+}
 # Stops whatever is being said, from any window. "" disables it.
 STOP_SPEECH_HOTKEY = os.environ.get("GREAT_SAGE_STOP_HOTKEY", "alt+2")
 

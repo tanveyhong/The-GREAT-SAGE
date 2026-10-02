@@ -90,3 +90,4 @@ tasks.json
 # Voice relay switches: they name this machine's own Claude/Codex logs.
 codex_voice.json
 claude_voice.json
+progress_cues.json

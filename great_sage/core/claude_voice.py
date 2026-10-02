@@ -6,6 +6,7 @@ import threading
 import time
 
 from great_sage.core.codex_voice import new_records, opener, speech_text
+from great_sage.core.progress_cues import CueTracker
 
 log = logging.getLogger(__name__)
 CONFIG = Path(__file__).resolve().parents[2] / 'claude_voice.json'
@@ -30,6 +31,34 @@ def user_prompt(record):
     if not isinstance(content, str) or not content.strip() or content.lstrip().startswith('<'):
         return None
     return content.strip()
+
+
+# Tools that stop and wait for Master's answer.
+_ASKING_TOOLS = {'AskUserQuestion', 'ExitPlanMode'}
+_SHELL_TOOLS = {'Bash', 'PowerShell'}
+
+
+def tool_events(record):
+    """Progress events (see progress_cues.CueTracker) in one log record."""
+    if record.get('isSidechain'):
+        return []
+    content = (record.get('message') or {}).get('content')
+    if not isinstance(content, list):
+        return []
+    events = []
+    for block in content:
+        if not isinstance(block, dict):
+            continue
+        if block.get('type') == 'tool_use':
+            name = block.get('name', '')
+            if name in _ASKING_TOOLS:
+                events.append(('ask',))
+            else:
+                command = (block.get('input') or {}).get('command') if name in _SHELL_TOOLS else None
+                events.append(('tool', block.get('id'), command if isinstance(command, str) else None))
+        elif block.get('type') == 'tool_result':
+            events.append(('result', block.get('tool_use_id'), not block.get('is_error')))
+    return events
 
 
 def completed_reply(record, entrypoint='claude-desktop'):
@@ -64,8 +93,10 @@ def _created(stat):
 
 
 class ClaudeVoiceRelay:
-    def __init__(self, speak, config_path=CONFIG):
+    def __init__(self, speak, config_path=CONFIG, cue=None):
         self.speak = speak
+        self.cue = cue  # Plays a progress cue by name; see progress_cues.
+        self.cues = CueTracker()
         self.config_path = Path(config_path)
         self.stop_event = threading.Event()
         self.thread = threading.Thread(target=self.run, name='claude-voice-relay', daemon=True)
@@ -133,6 +164,10 @@ class ClaudeVoiceRelay:
                 if prompt:
                     self.last_prompt = prompt
                 reply = completed_reply(record, cfg.get('entrypoint', ''))
+                entry = cfg.get('entrypoint', '')
+                if not entry or record.get('entrypoint') == entry:
+                    events = ([('prompt',)] if prompt else []) + tool_events(record)
+                    self._feed_cues(events + ([('done',)] if reply else []), record.get('timestamp'))
             except AttributeError:
                 continue
             if reply and reply[0] not in self.seen:
@@ -148,6 +183,12 @@ class ClaudeVoiceRelay:
             del self.pending[:-1]
         if self.pending and self.speak(self.pending[0]):
             self.pending.pop(0)
+
+    def _feed_cues(self, events, timestamp):
+        for event in events:
+            name = self.cues.feed(event, timestamp)
+            if name and self.cue:
+                self.cue(name)
 
     def run(self):
         while not self.stop_event.is_set():

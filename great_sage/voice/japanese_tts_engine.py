@@ -70,6 +70,7 @@ class JapaneseVoiceOutput(F5TTSVoiceOutput):
         self._single_shot = True
         self._sink = LocalSpeakerSink()
         self._stop_requested = False
+        self.speaking = False
         self.fx = VoiceFX()
 
     def _rebuild_reference(self):
@@ -200,6 +201,7 @@ class JapaneseVoiceOutput(F5TTSVoiceOutput):
             (translate_all, 'japanese-translate'), (synthesize_all, 'japanese-synth'))]
         for worker in workers:
             worker.start()
+        self.speaking = True  # Progress cues stay quiet while this is set.
         try:
             while True:
                 item = ready.get()
@@ -215,6 +217,7 @@ class JapaneseVoiceOutput(F5TTSVoiceOutput):
             self._stop_requested = True  # Wind the workers down with us.
             raise
         finally:
+            self.speaking = False
             # A stopped worker finishes at most its current translation or
             # XTTS piece; waiting keeps two syntheses off the GPU at once.
             if self._stop_requested:

@@ -21,6 +21,40 @@ def completed_reply(record):
     return payload.get('turn_id') or record.get('timestamp'), text
 
 
+_EXIT_CODE = re.compile(r'"exit_code"\s*:\s*(-?\d+)')
+_COMMAND = re.compile(r'\bcmd\s*:\s*"((?:[^"\\]|\\.)*)"')
+
+
+def _output_text(output):
+    if isinstance(output, list):
+        return ' '.join(b.get('text', '') for b in output if isinstance(b, dict))
+    return output if isinstance(output, str) else ''
+
+
+def tool_events(record):
+    """Progress events (see progress_cues.CueTracker) in one log record.
+
+    Codex runs shell commands inside an `exec` script as
+    tools.exec_command({cmd: "..."}), and reports "exit_code": N in the
+    output, so both are read out of the text."""
+    payload = record.get('payload') or {}
+    kind = payload.get('type')
+    if record.get('type') != 'response_item':
+        return []
+    if kind in ('custom_tool_call', 'function_call'):
+        if payload.get('name') == 'request_user_input_async':
+            return [('ask',)]
+        if payload.get('name') in ('sleep', 'wait'):
+            return []  # Codex idling for a command, not a new step.
+        source = payload.get('input') or payload.get('arguments') or ''
+        commands = _COMMAND.findall(source if isinstance(source, str) else '')
+        return [('tool', payload.get('call_id'), ' ; '.join(commands) or None)]
+    if kind in ('custom_tool_call_output', 'function_call_output'):
+        codes = [int(c) for c in _EXIT_CODE.findall(_output_text(payload.get('output')))]
+        return [('result', payload.get('call_id'), all(c == 0 for c in codes) if codes else None)]
+    return []
+
+
 def user_prompt(record):
     """The text Master typed into Codex, or None for injected context."""
     payload = record.get('payload') or {}
@@ -68,8 +102,11 @@ def new_records(path, offset):
 
 
 class CodexVoiceRelay:
-    def __init__(self, speak, config_path=CONFIG):
+    def __init__(self, speak, config_path=CONFIG, cue=None):
+        from great_sage.core.progress_cues import CueTracker
         self.speak = speak
+        self.cue = cue  # Plays a progress cue by name; see progress_cues.
+        self.cues = CueTracker()
         self.config_path = Path(config_path)
         self.stop_event = threading.Event()
         self.thread = threading.Thread(target=self.run, name='codex-voice-relay', daemon=True)
@@ -115,6 +152,11 @@ class CodexVoiceRelay:
                 continue
             if prompt:
                 self.last_prompt = prompt
+            events = ([('prompt',)] if prompt else []) + tool_events(record)
+            for event in events + ([('done',)] if reply else []):
+                name = self.cues.feed(event, record.get('timestamp'))
+                if name and self.cue:
+                    self.cue(name)
             if reply and reply[0] not in self.seen:
                 self.seen.add(reply[0])
                 spoken = speech_text(reply[1], cfg.get('max_chars', 6000))
