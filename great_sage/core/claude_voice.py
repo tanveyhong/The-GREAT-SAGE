@@ -1,6 +1,7 @@
 """Voice every Claude desktop session as it works, without driving Claude."""
 from pathlib import Path
 
+from great_sage.core.agent_scenarios import phase_of
 from great_sage.core.session_relay import (
     Parsed, SessionRelay, load_json_config, toggle_main)
 
@@ -95,6 +96,20 @@ def tool_steps(record):
     return steps
 
 
+def tool_phases(record):
+    """(call_id, scenario phase) for each tool call in the record."""
+    if record.get('isSidechain') or record.get('type') != 'assistant':
+        return []
+    content = (record.get('message') or {}).get('content')
+    phases = []
+    for block in content if isinstance(content, list) else ():
+        if isinstance(block, dict) and block.get('type') == 'tool_use':
+            args = block.get('input') or {}
+            command = args.get('command') if block.get('name') in _SHELL_TOOLS else None
+            phases.append((block.get('id'), phase_of(block.get('name'), command)))
+    return phases
+
+
 def _assistant_text(record, stop_reason):
     message = record.get('message') or {}
     if (record.get('type') != 'assistant' or record.get('isSidechain')
@@ -152,7 +167,8 @@ class ClaudeVoiceRelay(SessionRelay):
                       narration=narration(record),
                       events=tool_events(record),
                       steps=tool_steps(record),
-                      folder=record.get('cwd'))
+                      folder=record.get('cwd'),
+                      phases=tool_phases(record))
 
 
 if __name__ == '__main__':

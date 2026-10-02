@@ -91,3 +91,7 @@ tasks.json
 codex_voice.json
 claude_voice.json
 progress_cues.json
+
+# Scenario clips cloned from the local voice reference; regenerate with
+# py -m great_sage.voice.make_agent_clips
+voice_lines/agent/

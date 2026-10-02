@@ -955,6 +955,11 @@ async def run_server(engine, voice) -> None:
             if not on and translator is not None and hasattr(translator, "unload"):
                 # The point of switching it off is the GPU: free it now.
                 threading.Thread(target=translator.unload, daemon=True).start()
+            # Scenario-clip mode needs no XTTS either; switching back loads
+            # it in the background so the next reply is not the one to wait.
+            swap = getattr(voice, "_ensure_model" if on else "unload_model", None)
+            if swap is not None:
+                threading.Thread(target=swap, daemon=True).start()
         else:
             return False
         log.info("Coding-agent voice: %s %s", key, "on" if on else "off")
@@ -978,13 +983,56 @@ async def run_server(engine, voice) -> None:
     # the voice may translate locally. One lock, so the two never overlap.
     relay_speech_lock = threading.Lock()
 
+    # Translation off = scenario-clip mode: the relays synthesize nothing.
+    # Pre-made clips (core/agent_scenarios) stand in for replies, notes and
+    # cues, so neither the translator nor XTTS has to run while coding.
+    def _clip_mode():
+        return voice is not None and not getattr(voice, 'translate_enabled', True)
+
+    def _play_relay_scenario(name, is_reply):
+        if not _clip_mode():
+            return
+        from great_sage.core import agent_scenarios
+        path = agent_scenarios.pick_clip(name)
+        sink = active_connection['sink']
+        if path is None or sink is None:
+            return
+        # A reply's clip waits its turn; a phase clip only fills a silence.
+        if is_reply:
+            if not relay_speech_lock.acquire(timeout=15):
+                return
+        elif getattr(voice, 'speaking', False) or not relay_speech_lock.acquire(blocking=False):
+            return
+        try:
+            import soundfile as sf
+            samples, rate = sf.read(str(path), dtype='float32')
+            fx = getattr(voice, 'fx', None)
+            if fx is not None:
+                fx.begin_utterance()
+                samples = fx.apply(samples, rate)
+            sink.pending_text = agent_scenarios.caption(name, path)
+            sink.play(samples, rate)
+            log.info('Scenario clip: %s (%s)', name, path.name)
+            ws_now = active_connection['websocket']
+            if ws_now is not None:
+                asyncio.run_coroutine_threadsafe(
+                    ws_now.send(json.dumps({'type': 'speaking_done'})), loop)
+        except Exception as exc:
+            log.info('Scenario clip %s skipped: %s', name, exc)
+        finally:
+            relay_speech_lock.release()
+
     def _speak_relay_reply(text):
+        if _clip_mode():
+            return True  # Its scenario clip already played; nothing to synthesize.
         with relay_speech_lock:
             return _speak_relayed_reply(text)
 
     # An agent's between-steps note. Only into a silence, like a cue: a
     # note that has to wait is out of date by the time it could be heard.
     def _speak_relay_narration(text):
+        if _clip_mode():
+            return False  # Scenario clips cover the steps; the line shows the note.
         if getattr(voice, 'speaking', False) or not relay_speech_lock.acquire(blocking=False):
             return False
         try:
@@ -1030,6 +1078,8 @@ async def run_server(engine, voice) -> None:
     # silence: one that arrives while anything is being said is dropped,
     # never queued, because by the time it could play it would be stale.
     def _play_relay_cue(name):
+        if _clip_mode():
+            return  # The scenario clips replace these.
         path = getattr(settings, "PROGRESS_CUE_CLIPS", {}).get(name)
         sink = active_connection['sink']
         if not path or sink is None or voice is None or getattr(voice, 'speaking', False):
@@ -1064,7 +1114,8 @@ async def run_server(engine, voice) -> None:
             warm()
 
     relay_hooks = dict(cue=_play_relay_cue, narrate=_speak_relay_narration,
-                       activity=_send_activity, prepare=_prepare_relay_voice)
+                       activity=_send_activity, prepare=_prepare_relay_voice,
+                       scenario=_play_relay_scenario)
     from great_sage.core.codex_voice import CodexVoiceRelay
     codex_voice_relay = CodexVoiceRelay(_speak_relay_reply, **relay_hooks)
     from great_sage.core.claude_voice import ClaudeVoiceRelay

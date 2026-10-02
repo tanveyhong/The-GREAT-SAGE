@@ -20,6 +20,7 @@ import re
 import threading
 import time
 
+from great_sage.core.agent_scenarios import ScenarioTracker
 from great_sage.core.progress_cues import STALE_SECONDS, CueTracker, record_age
 from great_sage.voice.speakable import speakable, cap_for_speech
 
@@ -79,21 +80,24 @@ def _created(stat):
 
 class Parsed:
     """What one log record means to the relay."""
-    __slots__ = ('prompt', 'reply', 'narration', 'events', 'steps', 'folder')
+    __slots__ = ('prompt', 'reply', 'narration', 'events', 'steps', 'folder', 'phases')
 
-    def __init__(self, prompt=None, reply=None, narration=None, events=(), steps=(), folder=None):
+    def __init__(self, prompt=None, reply=None, narration=None, events=(), steps=(), folder=None,
+                 phases=()):
         self.prompt = prompt          # text Master typed
         self.reply = reply            # (id, text) of a finished turn
         self.narration = narration    # a between-steps note
         self.events = list(events)    # progress_cues tool events
         self.steps = list(steps)      # "Editing x.py" labels for the activity line
         self.folder = folder          # the session's working folder, when the record says
+        self.phases = list(phases)    # (call_id, agent_scenarios phase) per tool call
 
 
 class _Session:
     def __init__(self, offset):
         self.offset = offset
         self.cues = CueTracker()
+        self.scenes = ScenarioTracker()
         self.last_prompt = None
         self.label = None  # project folder name, for the activity line
 
@@ -101,8 +105,10 @@ class _Session:
 class SessionRelay:
     name = 'agent'
 
-    def __init__(self, speak, config_path, cue=None, narrate=None, activity=None, prepare=None):
+    def __init__(self, speak, config_path, cue=None, narrate=None, activity=None, prepare=None,
+                 scenario=None):
         self.prepare = prepare    # a reply is coming: warm the voice up
+        self.scenario = scenario  # (name, is_reply) -> plays a pre-made scenario clip
         self.speak = speak        # final reply -> True once handled
         self.cue = cue            # progress cue name -> plays a clip
         self.narrate = narrate    # narration text -> spoken if silent
@@ -204,6 +210,8 @@ class SessionRelay:
         fresh = record_age(record.get('timestamp')) <= STALE_SECONDS
         if parsed.prompt and fresh and self.prepare:
             self.prepare()
+        if fresh and self.scenario:
+            self._scenes(session, parsed)
         events = ([('prompt',)] if parsed.prompt else []) + parsed.events
         if parsed.narration:
             events.append(('narration',))
@@ -240,6 +248,21 @@ class SessionRelay:
                 # when the reply already opens with a clip phrase.
                 self.pending.pop(path, None)
                 self.pending[path] = f'{opener(session.last_prompt)} {spoken}'
+
+    def _scenes(self, session, parsed):
+        scenes = session.scenes
+        if parsed.prompt:
+            scenes.prompt()
+        names = [scenes.tool(call_id, phase) for call_id, phase in parsed.phases]
+        for event in parsed.events:
+            if event[0] == 'result':
+                names.append(scenes.result(event[1], event[2]))
+            elif event[0] == 'ask':
+                names.append(scenes.ask())
+        for name in filter(None, names):
+            self.scenario(name, False)
+        if parsed.reply:
+            self.scenario(scenes.reply(parsed.reply[1]), True)
 
     def _show(self, session, path, kind, text):
         if self.activity and text:

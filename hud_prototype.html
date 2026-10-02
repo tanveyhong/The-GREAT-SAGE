@@ -2192,9 +2192,10 @@ body.mini:hover #mini-exit { opacity: 1; }
           <input type="checkbox" data-agent-voice="translate" checked>
           Translate speech to Japanese
         </label>
-        <div class="setting-hint">Off: replies are spoken in English with the same
-          voice and no translation model runs - far less GPU use. Long replies are
-          read up to their opening instead of summarised.</div>
+        <div class="setting-hint">Off: Claude and Codex activity plays pre-made Great
+          Sage clips (working, tests passed, done, needs you...) - nothing is
+          translated or synthesized, and the voice model is unloaded, freeing GPU
+          and RAM. Full text stays on the overlay.</div>
         <label>
           <input type="checkbox" data-agent-voice="claude" checked>
           Speak Claude replies

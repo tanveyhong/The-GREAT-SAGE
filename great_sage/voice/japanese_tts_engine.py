@@ -95,26 +95,19 @@ def _log_memory(label):
 class JapaneseVoiceOutput(F5TTSVoiceOutput):
     def __init__(self, reference_audio_path, model_dir, translator, voice_lines=None,
                  disabled_voice_line_patterns=None, glossary_path=None,
-                 summary_threshold=700, summary_sentences=3, autocast=True, streaming=True):
-        from TTS.tts.configs.xtts_config import XttsConfig
-        from TTS.tts.models.xtts import Xtts
-        config = XttsConfig()
-        config.load_json(str(Path(model_dir) / 'config.json'))
-        self._model = Xtts.init_from_config(config)
-        self._model.load_checkpoint(config, checkpoint_dir=str(model_dir), eval=True)
+                 summary_threshold=700, summary_sentences=3, autocast=True, streaming=True,
+                 translate=True):
+        # XTTS is loaded on first use, not here: in scenario-clip mode
+        # (translate off) nothing is synthesized while coding, and not
+        # loading it saves ~1.8GB of VRAM and ~1.5GB of RAM.
+        self._model = None
+        self._model_dir = Path(model_dir)
+        self._model_lock = threading.Lock()
         self._cuda = torch.cuda.is_available()
-        self._model.to('cuda' if self._cuda else 'cpu')
-        # The checkpoint is read into RAM before it moves to the GPU; hand
-        # back what that copy left behind.
-        gc.collect()
-        if self._cuda:
-            torch.cuda.empty_cache()
-        _log_memory('after loading XTTS')
         self._memory_logged = False
         self._reference_audio_path = str(reference_audio_path)
         self._reference_text = ''
         self._ref_cache = None
-        self._rebuild_reference()
         self.translator = translator
         self.glossary = jt.load_glossary(glossary_path)
         self._translate_prompt = jt.translate_prompt(self.glossary)
@@ -122,9 +115,10 @@ class JapaneseVoiceOutput(F5TTSVoiceOutput):
         self.summary_sentences = summary_sentences
         self.autocast = autocast and self._cuda
         self.streaming = streaming
-        # Off: no translation model is used at all - replies are spoken in
-        # English with the same cloned voice (XTTS 'en'). Set from the HUD.
-        self.translate_enabled = True
+        # Off: no translation model is used at all. The relays then play
+        # pre-made scenario clips; anything else still speaks, in English
+        # with the same cloned voice (XTTS 'en'). Set from the HUD.
+        self.translate_enabled = translate
         self.voice_lines = voice_lines or []
         self._disabled_patterns = set(disabled_voice_line_patterns or ())
         self._single_shot = True
@@ -134,7 +128,46 @@ class JapaneseVoiceOutput(F5TTSVoiceOutput):
         self.fx = VoiceFX()
         self._translations = _LRU(TRANSLATION_CACHE_SIZE)  # English -> Japanese
         self._audio = _LRU(AUDIO_CACHE_SIZE)               # Japanese -> (samples, rate)
+        if translate:
+            self._ensure_model()
+        else:
+            log.info('XTTS not loaded: scenario-clip mode (translation off)')
+
+    def _ensure_model(self):
+        """Load XTTS if it is not loaded, and warm it up."""
+        with self._model_lock:
+            if self._model is not None:
+                return
+            from TTS.tts.configs.xtts_config import XttsConfig
+            from TTS.tts.models.xtts import Xtts
+            config = XttsConfig()
+            config.load_json(str(self._model_dir / 'config.json'))
+            model = Xtts.init_from_config(config)
+            model.load_checkpoint(config, checkpoint_dir=str(self._model_dir), eval=True)
+            model.to('cuda' if self._cuda else 'cpu')
+            # The checkpoint is read into RAM before it moves to the GPU;
+            # hand back what that copy left behind.
+            gc.collect()
+            if self._cuda:
+                torch.cuda.empty_cache()
+            self._model = model
+            self._rebuild_reference()
+            _log_memory('after loading XTTS')
         self.warm_up()
+
+    def unload_model(self):
+        """Give XTTS's VRAM and RAM back (scenario-clip mode). It loads
+        again by itself the next time something has to be synthesized."""
+        with self._model_lock:
+            if self._model is None or self.speaking:
+                return
+            self._model = None
+            self._conditioning = None
+            self._audio.clear()
+            gc.collect()
+            if self._cuda:
+                torch.cuda.empty_cache()
+            _log_memory('after unloading XTTS')
 
     def warm_up(self):
         """One tiny synthesis at startup. The first XTTS run in a process
@@ -195,6 +228,7 @@ class JapaneseVoiceOutput(F5TTSVoiceOutput):
         return summary if summary and len(summary) < len(text) else text
 
     def generate(self, text, lang='ja'):
+        self._ensure_model()
         samples = []
         for piece in (jt.split_english(text) if lang == 'en' else jt.split_japanese(text)):
             if self._stop_requested:
@@ -261,6 +295,7 @@ class JapaneseVoiceOutput(F5TTSVoiceOutput):
     def _stream_piece(self, piece, lang='ja'):
         """XTTS audio for one piece (<= the 71-char Japanese limit), chunk by
         chunk as it is generated."""
+        self._ensure_model()
         precision = (torch.autocast('cuda', dtype=torch.float16)
                      if self.autocast else contextlib.nullcontext())
         with torch.inference_mode(), precision:

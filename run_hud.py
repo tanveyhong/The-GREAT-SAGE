@@ -589,6 +589,7 @@ def _build_voice(provider=None):
     if not settings.VOICE_ENABLED:
         return None
     if settings.VOICE_ENGINE == "xtts_ja":
+        from great_sage.core import hud_settings
         from great_sage.voice.japanese_tts_engine import JapaneseVoiceOutput
         # Its own provider instance: translation wants temperature 0 and no
         # thinking, and must not follow the chat model when that is changed.
@@ -612,6 +613,7 @@ def _build_voice(provider=None):
             summary_sentences=settings.JAPANESE_SUMMARY_SENTENCES,
             autocast=settings.JAPANESE_AUTOCAST,
             streaming=getattr(settings, "JAPANESE_STREAMING", True),
+            translate=bool(hud_settings.load(settings.HUD_SETTINGS_PATH).get("voice_translate", True)),
         )
     if settings.VOICE_ENGINE not in ("pocket", "f5"):
         log.warning(

@@ -3,6 +3,7 @@ import json
 from pathlib import Path
 import re
 
+from great_sage.core.agent_scenarios import phase_of
 from great_sage.core.session_relay import (  # noqa: F401 - re-exported
     Parsed, SessionRelay, load_json_config, new_records, opener, speech_text, toggle_main)
 
@@ -78,6 +79,19 @@ def tool_steps(record):
     return ['Running ' + (text if len(text) <= 56 else text[:55] + '…')]
 
 
+def tool_phases(record):
+    """(call_id, scenario phase) for a Codex tool call."""
+    payload = record.get('payload') or {}
+    if record.get('type') != 'response_item' or payload.get('type') not in ('custom_tool_call', 'function_call'):
+        return []
+    name = payload.get('name', '')
+    if name in ('sleep', 'wait', 'request_user_input_async'):
+        return []
+    source = payload.get('input') or payload.get('arguments') or ''
+    commands = _COMMAND.findall(source if isinstance(source, str) else '')
+    return [(payload.get('call_id'), phase_of(name, ' ; '.join(commands) or None))]
+
+
 def folder(record):
     """The chat's working folder, from its session and turn context records."""
     if record.get('type') in ('session_meta', 'turn_context'):
@@ -143,7 +157,8 @@ class CodexVoiceRelay(SessionRelay):
                       narration=narration(record),
                       events=tool_events(record),
                       steps=tool_steps(record),
-                      folder=folder(record))
+                      folder=folder(record),
+                      phases=tool_phases(record))
 
 
 if __name__ == '__main__':
