@@ -284,14 +284,51 @@ def check_reference_voice() -> Requirement:
     )
 
 
+def check_scenario_clips() -> Requirement:
+    """The Coding Agent Companion's voice: the pre-made scenario clips.
+    Without them it still shows activity and subtitles, but says nothing."""
+    from great_sage.core.agent_scenarios import CLIP_DIR
+    count = len(list(CLIP_DIR.glob('*.wav'))) if CLIP_DIR.is_dir() else 0
+    return Requirement(
+        key="scenario_clips", label="Companion voice clips", ok=count > 0,
+        detail=f"{count} clips" if count else f"missing: {CLIP_DIR}",
+        fix_hint="Generate them with py -m great_sage.voice.make_agent_clips "
+                 "(needs the full install's XTTS once), then rebuild.",
+    )
+
+
+def _optional(check, note):
+    """A full-mode check the Companion can run without: shown, never blocking."""
+    def wrapped():
+        r = check()
+        r.blocking = False
+        r.label = f"{r.label} (optional)"
+        if not r.ok:
+            r.fix_hint = note
+        return r
+    wrapped.__name__ = check.__name__
+    return wrapped
+
+
 ALL_CHECKS = (check_ollama_installed, check_ollama_running, check_model,
               check_webview2, check_gpu, check_voice_weights,
               check_overlay_host, check_reference_voice)
 
+# The Companion (APP_MODE = "companion") loads no voice model, so a GPU,
+# voice weights and a reference clip are irrelevant to it - they made the
+# setup screen refuse to launch it. Ollama only serves Great Sage's own
+# chat, which the Companion does not need.
+_OLLAMA_NOTE = "Only needed to chat with Great Sage itself; the Companion runs without it."
+COMPANION_CHECKS = (_optional(check_ollama_installed, _OLLAMA_NOTE),
+                    _optional(check_ollama_running, _OLLAMA_NOTE),
+                    _optional(check_model, _OLLAMA_NOTE),
+                    check_webview2, check_overlay_host, check_scenario_clips)
+
 
 def run_all() -> List[Requirement]:
     results = []
-    for fn in ALL_CHECKS:
+    companion = getattr(settings, "APP_MODE", "full") == "companion"
+    for fn in (COMPANION_CHECKS if companion else ALL_CHECKS):
         try:
             results.append(fn())
         except Exception as exc:
