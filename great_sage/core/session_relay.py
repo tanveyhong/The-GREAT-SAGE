@@ -231,13 +231,15 @@ class SessionRelay:
             # Shown whether or not anything gets spoken: the line keeps up
             # with every step, speech only fills silences.
             if parsed.narration:
-                self._show(session, path, 'note', speech_text(parsed.narration, 160))
+                self._show(session, path, 'note', speech_text(parsed.narration, 400))
             for step in parsed.steps:
                 self._show(session, path, 'step', step)
             if any(e[0] == 'ask' for e in parsed.events):
                 self._show(session, path, 'ask', 'Waiting for you')
             if parsed.reply:
                 self._show(session, path, 'done', 'Reply ready')
+                # The reply itself, for the subtitles (they show its opening).
+                self._show(session, path, 'reply', speech_text(parsed.reply[1], 600))
         if parsed.reply and parsed.reply[0] not in self.seen:
             self.seen.add(parsed.reply[0])
             spoken = speech_text(parsed.reply[1], cfg.get('max_chars', 6000))

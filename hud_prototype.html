@@ -1628,6 +1628,34 @@ body.mini #agent-activity .agent-text {
   overflow: hidden;
   text-overflow: ellipsis;
 }
+/* Subtitle effects: in with a rise, focus and a glow sweep; out with a
+   lift and fade. The queue in script times each line. */
+@keyframes subtitleIn {
+  0%   { opacity: 0; transform: translateY(7px); filter: blur(4px); }
+  60%  { opacity: 1; filter: blur(0); }
+  100% { opacity: 1; transform: none; filter: none; }
+}
+@keyframes subtitleOut {
+  0%   { opacity: 1; transform: none; filter: none; }
+  100% { opacity: 0; transform: translateY(-6px); filter: blur(3px); }
+}
+@keyframes subtitleSweep {
+  0%   { transform: translateX(-110%); opacity: 0; }
+  30%  { opacity: 1; }
+  100% { transform: translateX(110%); opacity: 0; }
+}
+body.mini #mini-chat::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background: linear-gradient(100deg, transparent 30%, rgba(160, 215, 255, 0.28) 50%, transparent 70%);
+  transform: translateX(-110%);
+  opacity: 0;
+}
+body.mini #mini-chat.sub-enter { animation: subtitleIn 300ms ease-out both; }
+body.mini #mini-chat.sub-enter::after { animation: subtitleSweep 750ms ease-out 140ms both; }
+body.mini #mini-chat.sub-exit { animation: subtitleOut 300ms ease-in both; }
 body.mini #mini-chat .mini-chat-label {
   display: block;
   margin-bottom: 3px;
@@ -5725,27 +5753,110 @@ const MINI_CHAT_PAD = 3;
       + `<circle cx="${ax.toFixed(1)}" cy="${ay.toFixed(1)}" r="1.8"/>`;
   }
 
-  // holdMs: a subtitle for speech stays up until speaking_done hides it
-  // (with this as the backstop), instead of vanishing mid-clip at 9s.
-  function showMiniChat(text, holdMs) {
+  // ---- Subtitles -------------------------------------------------------
+  // Everything the overlay says in text - the agents' notes, their
+  // replies, scenario captions - goes through one queue and is shown a
+  // short line at a time: in with a rise, focus and glow sweep, held for
+  // its length, out with a lift and fade, then the next. A long reply is
+  // never one paragraph: it is split at sentences (then commas) and only
+  // its opening lines are shown. When lines pile up they are held for
+  // less, and routine lines are dropped before replies.
+  const SUB_MAX_CHARS = 90;
+  const SUB_QUEUE_MAX = 8;
+  const SUB_FADE_MS = 300;
+  const subQueue = [];
+  let subShowing = false;
+  let subTimer = null;
+
+  function subtitleLines(text, maxLines) {
+    const clean = String(text || '').replace(/\s+/g, ' ').trim();
+    if (!clean) return [];
+    const sentences = clean.match(/[^.!?。！？]+[.!?。！？]*/g) || [clean];
+    const lines = [];
+    for (let sentence of sentences) {
+      sentence = sentence.trim();
+      while (sentence.length > SUB_MAX_CHARS) {
+        let cut = sentence.lastIndexOf(', ', SUB_MAX_CHARS);
+        if (cut < SUB_MAX_CHARS / 3) cut = sentence.lastIndexOf(' ', SUB_MAX_CHARS);
+        if (cut <= 0) cut = SUB_MAX_CHARS;
+        lines.push(sentence.slice(0, cut + 1).trim());
+        sentence = sentence.slice(cut + 1).trim();
+      }
+      if (sentence) lines.push(sentence);
+    }
+    if (maxLines && lines.length > maxLines) {
+      const kept = lines.slice(0, maxLines);
+      kept[maxLines - 1] = kept[maxLines - 1].replace(/[.。]?$/, '…');
+      return kept;
+    }
+    return lines;
+  }
+
+  function queueSubtitle(text, label, opts) {
+    if (!captionEnabled) return;
+    const options = opts || {};
+    subtitleLines(text, options.maxLines).forEach((line) => {
+      subQueue.push({ line, label: label || '大賢者', keep: !!options.keep });
+    });
+    while (subQueue.length > SUB_QUEUE_MAX) {
+      const routine = subQueue.findIndex((item) => !item.keep);
+      subQueue.splice(routine >= 0 ? routine : 0, 1);
+    }
+    if (!subShowing) nextSubtitle();
+  }
+
+  function subtitleHold(line) {
+    let hold = Math.min(5500, Math.max(2000, 1200 + 45 * line.length));
+    if (subQueue.length > 2) hold *= 0.6;   // catching up
+    return hold;
+  }
+
+  function nextSubtitle() {
+    clearTimeout(subTimer);
+    const item = subQueue.shift();
+    if (!item) {
+      subShowing = false;
+      if (miniMode) hideMiniChat();
+      return;
+    }
+    subShowing = true;
+    const hold = subtitleHold(item.line);
+    if (!miniMode) {
+      // The main HUD shows the same lines through its own caption style.
+      showCaption(item.line);
+      subTimer = setTimeout(nextSubtitle, hold);
+      return;
+    }
     const { box, link, text: span } = miniChatEls();
-    if (!box || !span) return;
-    span.textContent = text;
+    if (!box || !span) { subShowing = false; return; }
+    const label = box.querySelector('.mini-chat-label');
+    if (label) label.textContent = item.label;
+    span.textContent = item.line;
+    box.classList.remove('sub-exit', 'sub-enter');
     box.classList.add('show');
-    link.classList.add('show');
-    setHostHitRegion(true);      // the bubble sits outside the core
-    // Measured after the text is in, or offsetWidth is the old size and
-    // the bubble lands a few pixels off.
+    if (link) link.classList.add('show');
+    void box.offsetWidth;              // restart the entrance animation
+    box.classList.add('sub-enter');
+    setHostHitRegion(true);            // the bubble sits outside the core
     placeMiniChat();
-    clearTimeout(miniChatTimer);
-    miniChatTimer = setTimeout(hideMiniChat, Math.max(MINI_CHAT_MS, holdMs || 0));
+    subTimer = setTimeout(() => {
+      box.classList.remove('sub-enter');
+      box.classList.add('sub-exit');
+      subTimer = setTimeout(() => {
+        box.classList.remove('sub-exit');
+        nextSubtitle();
+      }, SUB_FADE_MS);
+    }, hold);
   }
-  // Fade the subtitle shortly after the voice finishes.
-  function releaseMiniChat(afterMs) {
-    clearTimeout(miniChatTimer);
-    miniChatTimer = setTimeout(hideMiniChat, afterMs);
+
+  // Older callers (speech captions) feed the same queue.
+  function showMiniChat(text) {
+    queueSubtitle(text, '大賢者');
   }
+  // The queue times its own lines; nothing to release early.
+  function releaseMiniChat() {}
   window.__releaseMiniChat = releaseMiniChat;
+  window.__queueSubtitle = queueSubtitle;
 
   function hideMiniChat() {
     const { box, link } = miniChatEls();
@@ -6950,6 +7061,14 @@ const MINI_CHAT_PAD = 3;
     } else if (msg.type === 'audio_chunk') {
       playStreamChunk(msg);
     } else if (msg.type === 'agent_activity') {
+      if (msg.kind === 'reply' || msg.kind === 'note') {
+        // Text for the subtitles, not the activity line.
+        const who = ((msg.agent || '') + ' · ' + (msg.session || '')).toUpperCase();
+        if (window.__queueSubtitle) {
+          window.__queueSubtitle(msg.text, who, msg.kind === 'reply' ? { maxLines: 3, keep: true } : null);
+        }
+        if (msg.kind === 'reply') return;
+      }
       if (window.__showAgentActivity) window.__showAgentActivity(msg);
     } else if (msg.type === 'stop_audio') {
       // The stop-speech key. Silence both speech elements now; the server
