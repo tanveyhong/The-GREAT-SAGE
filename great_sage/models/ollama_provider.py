@@ -212,6 +212,26 @@ class OllamaProvider(ModelProvider):
             log.warning("Could not unload %s from VRAM", self.model)
             return False
 
+    def warm(self) -> bool:
+        """Load the model into VRAM ahead of a request that is coming.
+
+        The same zero-token request as unload(), with the normal keep_alive
+        instead of 0. Loading took 4-5s of the first reply's latency after
+        the model had idled out.
+        """
+        # The same options a real request sends: a different num_ctx makes
+        # Ollama reload the model, which would undo the warming entirely.
+        body = {"model": self.model,
+                "options": {**self.options, "num_ctx": self.base_num_ctx}}
+        if self.keep_alive is not None:
+            body["keep_alive"] = self.keep_alive
+        try:
+            requests.post(f"{self.host}/api/generate", timeout=60, json=body)
+            return True
+        except Exception:
+            log.warning("Could not preload %s", self.model)
+            return False
+
     def chat_raw(self, messages, tools=None):
         """One /api/chat round trip, returning Ollama's whole `message`.
 

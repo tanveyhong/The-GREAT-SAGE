@@ -565,16 +565,22 @@ def _configure_logging() -> None:
     """Writes to great_sage_hud.log (readable after the fact, since this
     runs as a detached GUI window with no visible console) and echoes to
     stdout too, in case that IS being captured somewhere."""
+    handlers = [
+        logging.FileHandler(LOG_PATH, mode="a", encoding="utf-8"),
+        # Buffers from here on, so the HUD's LOGS console can show
+        # what happened before it was opened.
+        HistoryLogHandler(),
+    ]
+    # Under pythonw there is no console: sys.stdout is None. A handler on it
+    # fails every record, and logging's error report then quotes the source
+    # line to a cp1252 stderr - a line holding Japanese text raised from
+    # inside that report and took startup down with it.
+    if sys.stdout is not None:
+        handlers.insert(1, logging.StreamHandler(sys.stdout))
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-        handlers=[
-            logging.FileHandler(LOG_PATH, mode="a", encoding="utf-8"),
-            logging.StreamHandler(sys.stdout),
-            # Buffers from here on, so the HUD's LOGS console can show
-            # what happened before it was opened.
-            HistoryLogHandler(),
-        ],
+        handlers=handlers,
     )
 
 

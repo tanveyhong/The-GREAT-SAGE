@@ -994,8 +994,15 @@ async def run_server(engine, voice) -> None:
             except Exception:
                 pass
 
+    # A prompt was just sent to an agent, so a reply is coming: load the
+    # translation model now rather than when the reply lands.
+    def _prepare_relay_voice():
+        warm = getattr(voice, 'warm_translator', None)
+        if warm:
+            warm()
+
     relay_hooks = dict(cue=_play_relay_cue, narrate=_speak_relay_narration,
-                       activity=_send_activity)
+                       activity=_send_activity, prepare=_prepare_relay_voice)
     from great_sage.core.codex_voice import CodexVoiceRelay
     codex_voice_relay = CodexVoiceRelay(_speak_relay_reply, **relay_hooks)
     from great_sage.core.claude_voice import ClaudeVoiceRelay

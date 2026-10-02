@@ -101,7 +101,8 @@ class _Session:
 class SessionRelay:
     name = 'agent'
 
-    def __init__(self, speak, config_path, cue=None, narrate=None, activity=None):
+    def __init__(self, speak, config_path, cue=None, narrate=None, activity=None, prepare=None):
+        self.prepare = prepare    # a reply is coming: warm the voice up
         self.speak = speak        # final reply -> True once handled
         self.cue = cue            # progress cue name -> plays a clip
         self.narrate = narrate    # narration text -> spoken if silent
@@ -201,6 +202,8 @@ class SessionRelay:
         if parsed.folder:
             session.label = Path(str(parsed.folder).rstrip('\\/')).name or None
         fresh = record_age(record.get('timestamp')) <= STALE_SECONDS
+        if parsed.prompt and fresh and self.prepare:
+            self.prepare()
         events = ([('prompt',)] if parsed.prompt else []) + parsed.events
         if parsed.narration:
             events.append(('narration',))

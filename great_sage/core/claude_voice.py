@@ -132,8 +132,8 @@ def load_config(path=CONFIG):
 class ClaudeVoiceRelay(SessionRelay):
     name = 'Claude'
 
-    def __init__(self, speak, config_path=CONFIG, cue=None, narrate=None, activity=None):
-        super().__init__(speak, config_path, cue=cue, narrate=narrate, activity=activity)
+    def __init__(self, speak, config_path=CONFIG, **hooks):
+        super().__init__(speak, config_path, **hooks)
 
     def load_config(self):
         return load_config(self.config_path)
