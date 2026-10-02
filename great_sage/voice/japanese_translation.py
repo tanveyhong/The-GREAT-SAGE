@@ -103,12 +103,14 @@ def _folder_phrase(match):
     return (f'the {_words(last)} folder' if last else 'a folder') + stop
 
 
-def prepare_english(text, glossary=None):
-    """Reword what Japanese speech cannot say: links, paths, identifiers.
+def prepare_english(text, glossary=None, japanese=True):
+    """Reword what speech cannot say: links, paths, identifiers.
 
     Proper names in the glossary are written straight into the English as
     katakana; left to the prompt alone, the small model read Claude as both
-    クラウド (cloud) and クウェン in one reply."""
+    クラウド (cloud) and クウェン in one reply. japanese=False is for
+    speaking the English itself: no katakana, units spelled in English."""
+    seconds, millis = (' 秒', ' ミリ秒') if japanese else (' seconds', ' milliseconds')
     text = re.sub(r'https?://\S+', 'a link', text)
     # A path keeps only its last part; the folders are noise when heard.
     text = re.sub(r'(?<![\w.])(?:[A-Za-z]:[\\/])?(?:[\w.~-]+[\\/])+(?=[\w-]+\.\w)', '', text)
@@ -119,7 +121,7 @@ def prepare_english(text, glossary=None):
     text = re.sub(r'\b(?=[0-9a-f]*\d)(?=[0-9a-f]*[a-f])[0-9a-f]{7,40}\b', 'an ID', text)
     text = re.sub(r'\bv(\d+(?:\.\d+)+)\b', r'version \1', text)
     text = re.sub(r'\b(\d+(?:\.\d+)?) ?(ms|s)\b',
-                  lambda m: m.group(1) + (' ミリ秒' if m.group(2) == 'ms' else ' 秒'), text)
+                  lambda m: m.group(1) + (millis if m.group(2) == 'ms' else seconds), text)
     # snake_case and CamelCase identifiers become separate words.
     text = re.sub(r'\b\w+_\w+\b', lambda m: _words(m.group()), text)
     text = re.sub(r'\b[A-Z][a-z]+(?:[A-Z][a-z]+)+\b', lambda m: _words(m.group()), text)
@@ -189,6 +191,26 @@ def speech_units(text, first=140, most=300):
 
 
 _PARTICLE_CUT = re.compile(r'(?<=[はがをにでともへや])(?=[^ぁ-ゖー、。])')
+
+
+def split_english(text, limit=240):
+    """Pieces under XTTS's English limit (250): sentence ends, then commas,
+    then spaces."""
+    pieces = []
+    for sentence in re.split(r'(?<=[.!?])\s+|\n+', text):
+        sentence = sentence.strip()
+        while len(sentence) > limit:
+            window = sentence[:limit + 1]
+            cut = max(window.rfind(', '), window.rfind('; '))
+            if cut < limit // 3:
+                cut = window.rfind(' ')
+            if cut <= 0:
+                cut = limit
+            pieces.append(sentence[:cut + 1].strip())
+            sentence = sentence[cut + 1:].strip()
+        if sentence:
+            pieces.append(sentence)
+    return [p for p in pieces if re.search(r'\w', p)]
 
 
 def split_japanese(text, limit=65):

@@ -2186,6 +2186,35 @@ body.mini:hover #mini-exit { opacity: 1; }
         Play "Good morning" greeting on startup
       </label>
 
+      <h4>CODING AGENTS</h4>
+      <div id="agent-voice-settings">
+        <label>
+          <input type="checkbox" data-agent-voice="translate" checked>
+          Translate speech to Japanese
+        </label>
+        <div class="setting-hint">Off: replies are spoken in English with the same
+          voice and no translation model runs - far less GPU use. Long replies are
+          read up to their opening instead of summarised.</div>
+        <label>
+          <input type="checkbox" data-agent-voice="claude" checked>
+          Speak Claude replies
+        </label>
+        <label>
+          <input type="checkbox" data-agent-voice="codex" checked>
+          Speak Codex replies
+        </label>
+        <label>
+          <input type="checkbox" data-agent-voice="narrate" checked>
+          Speak progress notes ("Now running the tests.")
+        </label>
+        <label>
+          <input type="checkbox" data-agent-voice="cues" checked>
+          Progress cue sounds (recorded clips)
+        </label>
+        <div class="setting-hint">Applies at once - no need to save. Notes still
+          show on the overlay's activity line when not spoken.</div>
+      </div>
+
       <h4>CAPTION</h4>
       <label>
         <input type="checkbox" id="caption-toggle" checked>
@@ -6856,6 +6885,16 @@ const MINI_CHAT_PAD = 3;
     }
   }
 
+  // Settings > CODING AGENTS. Only a real click sends: the generic settings
+  // restore skips these (isVoiceListInput), and the server's
+  // agent_voice_state sets them without firing anything.
+  document.querySelectorAll('[data-agent-voice]').forEach((box) => {
+    box.addEventListener('change', (event) => {
+      if (!event.isTrusted || !ws || ws.readyState !== WebSocket.OPEN) return;
+      ws.send(JSON.stringify({ type: 'set_agent_voice', key: box.dataset.agentVoice, on: box.checked }));
+    });
+  });
+
   function stopSpeechStreams() {
     for (const stream of speechStreams.values()) {
       stream.stopped = true;
@@ -6899,6 +6938,12 @@ const MINI_CHAT_PAD = 3;
         saveChats();
         maybeNameChat(currentTopic());
       }
+    } else if (msg.type === 'agent_voice_state') {
+      // Server-owned switches: reflect them, never echo them back.
+      document.querySelectorAll('[data-agent-voice]').forEach((box) => {
+        const key = box.dataset.agentVoice;
+        if (typeof msg[key] === 'boolean') box.checked = msg[key];
+      });
     } else if (msg.type === 'audio_chunk') {
       playStreamChunk(msg);
     } else if (msg.type === 'agent_activity') {
@@ -9834,7 +9879,10 @@ const MINI_CHAT_PAD = 3;
     // #voice-input-settings (wake-word toggle + phrases) is excluded too -
     // that state is server-authoritative via its own "wake_word_settings"
     // message/dedicated hud_settings.json keys, not the generic blob.
+    // #agent-voice-settings likewise: the server owns those switches (the
+    // relay and cue config files) and sends them as "agent_voice_state".
     return !!(
+      el.closest('#agent-voice-settings') ||
       el.closest('#voice-lines-list') ||
       el.closest('#voice-candidates-list') ||
       el.closest('#voice-fx-settings') ||

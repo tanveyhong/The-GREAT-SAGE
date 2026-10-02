@@ -908,6 +908,58 @@ async def run_server(engine, voice) -> None:
             except Exception:
                 log.exception("Could not restore saved voice FX - continuing dry")
 
+    # --- Coding-agent voice switches (Settings > CODING AGENTS) -----------
+    # Each lives where its relay already reads it, so the .cmd toggles and
+    # the panel stay in step: the relay configs, progress_cues.json, and the
+    # HUD settings for translation (engine state, applied here at startup).
+    from great_sage.core import claude_voice as _claude_cfg
+    from great_sage.core import codex_voice as _codex_cfg
+    from great_sage.core import progress_cues as _cues_cfg
+
+    if voice is not None and hasattr(voice, "translate_enabled"):
+        voice.translate_enabled = bool(
+            hud_settings.load(settings.HUD_SETTINGS_PATH).get("voice_translate", True))
+
+    def _write_json(path, cfg):
+        temporary = path.with_suffix(".tmp")
+        temporary.write_text(json.dumps(cfg, indent=2), encoding="utf-8")
+        temporary.replace(path)
+
+    def _agent_voice_state():
+        cues = _cues_cfg.load_config()
+        return {
+            "type": "agent_voice_state",
+            "claude": bool(_claude_cfg.load_config().get("enabled")),
+            "codex": bool(_codex_cfg.load_config().get("enabled")),
+            "narrate": bool(cues.get("narrate", True)),
+            "cues": bool(cues.get("enabled")),
+            "translate": bool(getattr(voice, "translate_enabled", True)),
+        }
+
+    def _set_agent_voice(key, on):
+        if key in ("claude", "codex"):
+            module = _claude_cfg if key == "claude" else _codex_cfg
+            cfg = module.load_config()
+            cfg["enabled"] = on
+            _write_json(module.CONFIG, cfg)
+        elif key in ("narrate", "cues"):
+            cfg = _cues_cfg.load_config()
+            cfg["narrate" if key == "narrate" else "enabled"] = on
+            _write_json(_cues_cfg.CONFIG, cfg)
+        elif key == "translate" and voice is not None and hasattr(voice, "translate_enabled"):
+            voice.translate_enabled = on
+            saved = hud_settings.load(settings.HUD_SETTINGS_PATH)
+            saved["voice_translate"] = on
+            hud_settings.save(settings.HUD_SETTINGS_PATH, saved)
+            translator = getattr(voice, "translator", None)
+            if not on and translator is not None and hasattr(translator, "unload"):
+                # The point of switching it off is the GPU: free it now.
+                threading.Thread(target=translator.unload, daemon=True).start()
+        else:
+            return False
+        log.info("Coding-agent voice: %s %s", key, "on" if on else "off")
+        return True
+
     log_handler = BroadcastLogHandler(loop)
     log_handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s"))
     logging.getLogger().addHandler(log_handler)
@@ -1692,6 +1744,7 @@ async def run_server(engine, voice) -> None:
                     # the standalone overlay has its own.
                     role = str(data.get("role") or "?")[:40]
                     log.info("Client is the %s", role)
+                    await websocket.send(json.dumps(_agent_voice_state()))
                     if role in ("hud", "overlay"):
                         voice_clients[websocket] = (role, sink)
                         _claim_voice_route(websocket, sink)
@@ -1792,6 +1845,15 @@ async def run_server(engine, voice) -> None:
                         saved = hud_settings.load(settings.HUD_SETTINGS_PATH)
                         saved["voice_fx"] = params
                         hud_settings.save(settings.HUD_SETTINGS_PATH, saved)
+                elif msg_type == "set_agent_voice":
+                    if _set_agent_voice(str(data.get("key")), bool(data.get("on"))):
+                        # Every open window shows the same switches.
+                        state = json.dumps(_agent_voice_state())
+                        for client in list(all_clients):
+                            try:
+                                await client.send(state)
+                            except Exception:
+                                pass
                 elif msg_type == "set_mic_device":
                     index = data.get("index")
                     ptt_recorder.device = index

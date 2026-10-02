@@ -122,6 +122,9 @@ class JapaneseVoiceOutput(F5TTSVoiceOutput):
         self.summary_sentences = summary_sentences
         self.autocast = autocast and self._cuda
         self.streaming = streaming
+        # Off: no translation model is used at all - replies are spoken in
+        # English with the same cloned voice (XTTS 'en'). Set from the HUD.
+        self.translate_enabled = True
         self.voice_lines = voice_lines or []
         self._disabled_patterns = set(disabled_voice_line_patterns or ())
         self._single_shot = True
@@ -145,7 +148,7 @@ class JapaneseVoiceOutput(F5TTSVoiceOutput):
     def warm_translator(self):
         """Master just sent an agent a prompt, so a reply is coming: load the
         translation model now, in the background, if the provider can."""
-        warm = getattr(self.translator, 'warm', None)
+        warm = getattr(self.translator, 'warm', None) if self.translate_enabled else None
         if warm:
             threading.Thread(target=warm, name='translator-warm', daemon=True).start()
 
@@ -191,16 +194,16 @@ class JapaneseVoiceOutput(F5TTSVoiceOutput):
             jt.SUMMARY_PROMPT.format(sentences=self.summary_sentences), text)
         return summary if summary and len(summary) < len(text) else text
 
-    def generate(self, text):
+    def generate(self, text, lang='ja'):
         samples = []
-        for piece in jt.split_japanese(text):
+        for piece in (jt.split_english(text) if lang == 'en' else jt.split_japanese(text)):
             if self._stop_requested:
                 break
             precision = (torch.autocast('cuda', dtype=torch.float16)
                          if self.autocast else contextlib.nullcontext())
             with torch.inference_mode(), precision:
                 result = self._model.inference(
-                    piece, 'ja', *self._conditioning,
+                    piece, lang, *self._conditioning,
                     enable_text_splitting=True, temperature=0.65)
             wav = result['wav']
             wav = wav.float().cpu().numpy() if torch.is_tensor(wav) else wav
@@ -240,6 +243,12 @@ class JapaneseVoiceOutput(F5TTSVoiceOutput):
                 if kind == 'audio':
                     put(out, ('file', payload, rest[0]))
                 else:
+                    if not self.translate_enabled:
+                        # No translation model at all: speak the English.
+                        english = jt.prepare_english(payload, None, japanese=False)
+                        if english:
+                            put(out, ('text_en', english, payload))
+                        continue
                     japanese = self.translate(payload)
                     if japanese:
                         log.info('Japanese for %r: %s', payload[:60], japanese[:200])
@@ -249,14 +258,14 @@ class JapaneseVoiceOutput(F5TTSVoiceOutput):
         finally:
             put(out, None)
 
-    def _stream_piece(self, piece):
+    def _stream_piece(self, piece, lang='ja'):
         """XTTS audio for one piece (<= the 71-char Japanese limit), chunk by
         chunk as it is generated."""
         precision = (torch.autocast('cuda', dtype=torch.float16)
                      if self.autocast else contextlib.nullcontext())
         with torch.inference_mode(), precision:
             for chunk in self._model.inference_stream(
-                    piece, 'ja', *self._conditioning,
+                    piece, lang, *self._conditioning,
                     stream_chunk_size=STREAM_CHUNK_TOKENS, temperature=0.65,
                     enable_text_splitting=False):
                 if self._stop_requested:
@@ -344,24 +353,26 @@ class JapaneseVoiceOutput(F5TTSVoiceOutput):
                 for path, _ in held:
                     send(_clip_samples(path))
                 held = []
-                hit = self._audio.get_recent(payload)
+                lang = 'en' if kind == 'text_en' else 'ja'
+                hit = self._audio.get_recent((lang, payload))
                 if hit is not None:
                     log.info('Japanese voice reused cached audio for %r', caption[:50])
                     for start in range(0, len(hit[0]), CACHED_CHUNK):
                         send(hit[0][start:start + CACHED_CHUNK])
                     continue
                 made = []
-                for n, piece in enumerate(jt.split_japanese(payload)):
+                split = jt.split_english if lang == 'en' else jt.split_japanese
+                for n, piece in enumerate(split(payload)):
                     if self._stop_requested:
                         break
                     if n:
                         made.append(PIECE_GAP)
                         send(PIECE_GAP)
-                    for chunk in self._stream_piece(piece):
+                    for chunk in self._stream_piece(piece, lang):
                         made.append(chunk)
                         send(chunk)
                 if made and len(payload) <= AUDIO_CACHE_MAX_CHARS and not self._stop_requested:
-                    self._audio.keep(payload, (np.concatenate(made), RATE))
+                    self._audio.keep((lang, payload), (np.concatenate(made), RATE))
             if not self._stop_requested:
                 send_held(held)  # Clips with no speech after them.
                 # Silence through the effects lets the reverb ring out, and
@@ -416,14 +427,15 @@ class JapaneseVoiceOutput(F5TTSVoiceOutput):
                     if kind == 'file':
                         held.append((payload, caption))
                         continue
-                    hit = self._audio.get_recent(payload)
+                    lang = 'en' if kind == 'text_en' else 'ja'
+                    hit = self._audio.get_recent((lang, payload))
                     if hit is not None:
                         samples, rate = hit
                         log.info('Japanese voice reused cached audio for %r', caption[:50])
                     else:
-                        samples, rate = self.generate(payload)
+                        samples, rate = self.generate(payload, lang)
                         if len(payload) <= AUDIO_CACHE_MAX_CHARS and not self._stop_requested:
-                            self._audio.keep(payload, (samples, rate))
+                            self._audio.keep((lang, payload), (samples, rate))
                     if held:
                         try:
                             lead = [_clip_samples(path) for path, _ in held]
@@ -524,7 +536,18 @@ class JapaneseVoiceOutput(F5TTSVoiceOutput):
             text = 'Notice. ' + text
         items = self._plan(text)
         prose = ' '.join(item[1] for item in items if item[0] == 'text')
-        if self.summary_threshold and len(prose) > self.summary_threshold:
+        if self.summary_threshold and len(prose) > self.summary_threshold and not self.translate_enabled:
+            # Summaries need the language model too; read the opening instead.
+            kept, total = [], 0
+            for item in items:
+                if item[0] == 'text':
+                    if total >= self.summary_threshold:
+                        continue
+                    total += len(item[1])
+                kept.append(item)
+            log.info('Translation off: speaking the first %d of %d characters', total, len(prose))
+            items = kept
+        elif self.summary_threshold and len(prose) > self.summary_threshold:
             summary = self.summarize(prose)
             log.info('Speaking a %d-character summary of a %d-character reply',
                      len(summary), len(prose))
