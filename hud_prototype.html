@@ -6944,6 +6944,8 @@ const MINI_CHAT_PAD = 3;
       document.querySelectorAll('[data-agent-voice]').forEach((box) => {
         const key = box.dataset.agentVoice;
         if (typeof msg[key] === 'boolean') box.checked = msg[key];
+        // The Companion has no translator or TTS model to turn on.
+        if (key === 'translate') box.disabled = !!msg.companion;
       });
     } else if (msg.type === 'audio_chunk') {
       playStreamChunk(msg);

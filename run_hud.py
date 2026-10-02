@@ -588,6 +588,14 @@ def _build_voice(provider=None):
     log = logging.getLogger(__name__)
     if not settings.VOICE_ENABLED:
         return None
+    if getattr(settings, "APP_MODE", "full") == "companion":
+        # Recorded clips only: no torch, no TTS model, no translator.
+        from great_sage.voice.clip_voice import ClipVoiceOutput
+        log.info("Coding Agent Companion: clip voice only (no TTS model loaded)")
+        return ClipVoiceOutput(
+            voice_lines=build_voice_lines(),
+            disabled_voice_line_patterns=build_disabled_voice_line_patterns(),
+        )
     if settings.VOICE_ENGINE == "xtts_ja":
         from great_sage.core import hud_settings
         from great_sage.voice.japanese_tts_engine import JapaneseVoiceOutput
@@ -673,8 +681,13 @@ def main() -> int:
     try:
         provider.get_available_models()
     except ModelProviderError as exc:
-        logging.getLogger(__name__).error("Startup error: %s", exc)
-        return 1
+        if getattr(settings, "APP_MODE", "full") != "companion":
+            logging.getLogger(__name__).error("Startup error: %s", exc)
+            return 1
+        # The Companion's job is the coding agents; Great Sage's own chat is
+        # extra, and simply waits for Ollama if it is ever used.
+        logging.getLogger(__name__).info("Ollama not reachable (%s) - chat is off "
+                                         "until it is; the Companion runs without it", exc)
 
     engine = ChatEngine(
         provider,

@@ -590,6 +590,14 @@ VOICE_ENABLED = True
 #              f5_tts_engine.py's docstring for the measurements.
 VOICE_ENGINE = "f5"
 
+# "companion": the Coding Agent Companion - the HUD and overlay voicing
+# Claude and Codex with pre-made clips (core/agent_scenarios). No TTS
+# model, no translator, no wake-word listener and no requirement that
+# Ollama is running: Great Sage idles in tens of MB instead of ~2.5GB.
+# "full": the original assistant - live cloned voice, translation, wake
+# word. VOICE_ENGINE above only applies in "full".
+APP_MODE = os.environ.get("GREAT_SAGE_MODE", "companion")
+
 # Words per minute. pyttsx3's default is ~200; slower is often easier to
 # follow for a "companion" voice. (sapi5 engine only)
 VOICE_RATE = 175

@@ -916,7 +916,8 @@ async def run_server(engine, voice) -> None:
     from great_sage.core import codex_voice as _codex_cfg
     from great_sage.core import progress_cues as _cues_cfg
 
-    if voice is not None and hasattr(voice, "translate_enabled"):
+    companion = bool(getattr(voice, "companion", False))
+    if voice is not None and hasattr(voice, "translate_enabled") and not companion:
         voice.translate_enabled = bool(
             hud_settings.load(settings.HUD_SETTINGS_PATH).get("voice_translate", True))
 
@@ -934,6 +935,8 @@ async def run_server(engine, voice) -> None:
             "narrate": bool(cues.get("narrate", True)),
             "cues": bool(cues.get("enabled")),
             "translate": bool(getattr(voice, "translate_enabled", True)),
+            # The Companion has no translator or TTS model to switch on.
+            "companion": companion,
         }
 
     def _set_agent_voice(key, on):
@@ -946,7 +949,8 @@ async def run_server(engine, voice) -> None:
             cfg = _cues_cfg.load_config()
             cfg["narrate" if key == "narrate" else "enabled"] = on
             _write_json(_cues_cfg.CONFIG, cfg)
-        elif key == "translate" and voice is not None and hasattr(voice, "translate_enabled"):
+        elif (key == "translate" and voice is not None and not companion
+              and hasattr(voice, "translate_enabled")):
             voice.translate_enabled = on
             saved = hud_settings.load(settings.HUD_SETTINGS_PATH)
             saved["voice_translate"] = on
@@ -1417,7 +1421,11 @@ async def run_server(engine, voice) -> None:
     if saved_mic_device is not None:
         ptt_recorder.device = saved_mic_device
         wake_word_listener.device = saved_mic_device
-    if hud_settings.load(settings.HUD_SETTINGS_PATH).get("wake_word_enabled"):
+    if getattr(voice, "companion", False):
+        # Listening means loading a speech model; the Companion only does so
+        # if Master switches the wake word on himself.
+        log.info("Coding Agent Companion: wake-word listener not started")
+    elif hud_settings.load(settings.HUD_SETTINGS_PATH).get("wake_word_enabled"):
         wake_word_listener.start()
         log.info("Wake-word listener started (restored from settings)")
 
