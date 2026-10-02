@@ -5857,9 +5857,17 @@ const MINI_CHAT_PAD = 3;
   function queueSubtitle(text, label, opts) {
     if (!captionEnabled) return;
     const options = opts || {};
-    subtitleLines(text, options.maxLines).forEach((line) => {
-      subQueue.push({ line, label: label || '大賢者', keep: !!options.keep });
-    });
+    const items = subtitleLines(text, options.maxLines).map((line) => ({
+      line, label: label || '大賢者', keep: !!options.keep || !!options.audio, audio: !!options.audio,
+    }));
+    if (options.audio) {
+      // The caption of a clip that is starting NOW: it goes first, and a
+      // note on screen gives way to it at once.
+      subQueue.unshift(...items);
+      if (subShowing && subCurrent && !subCurrent.audio) exitSubtitle();
+    } else {
+      subQueue.push(...items);
+    }
     while (subQueue.length > SUB_QUEUE_MAX) {
       const routine = subQueue.findIndex((item) => !item.keep);
       subQueue.splice(routine >= 0 ? routine : 0, 1);
@@ -5868,14 +5876,51 @@ const MINI_CHAT_PAD = 3;
   }
 
   function subtitleHold(line) {
-    let hold = Math.min(5500, Math.max(2000, 1200 + 45 * line.length));
-    if (subQueue.length > 2) hold *= 0.6;   // catching up
+    let hold = Math.min(6500, Math.max(2500, 1400 + 55 * line.length));
+    if (subQueue.length > 3) hold *= 0.7;   // catching up
     return hold;
+  }
+
+  // Is any speech audio still sounding? Clip elements or streamed chunks.
+  function speechSounding() {
+    return speechAudios.some((el) => el.src && !el.paused && !el.ended)
+      || speechStreams.size > 0;
+  }
+
+  let subCurrent = null;
+
+  function exitSubtitle() {
+    clearTimeout(subTimer);
+    const { box } = miniChatEls();
+    if (!miniMode || !box) { nextSubtitle(); return; }
+    box.classList.remove('sub-enter');
+    box.classList.add('sub-exit');
+    subTimer = setTimeout(() => {
+      box.classList.remove('sub-exit');
+      nextSubtitle();
+    }, SUB_FADE_MS);
+  }
+
+  // A clip's caption stays until its audio has finished (plus a beat),
+  // however short its text: the line must not leave before the voice does.
+  function holdThenExit(item, hold, waited) {
+    subTimer = setTimeout(() => {
+      if (item.audio && speechSounding() && waited < 20000) {
+        holdThenExit(item, 200, waited + hold);
+        return;
+      }
+      if (item.audio && hold === 200) {
+        subTimer = setTimeout(exitSubtitle, 350);   // the beat after the voice
+        return;
+      }
+      exitSubtitle();
+    }, hold);
   }
 
   function nextSubtitle() {
     clearTimeout(subTimer);
     const item = subQueue.shift();
+    subCurrent = item || null;
     if (!item) {
       subShowing = false;
       if (miniMode) hideMiniChat();
@@ -5886,7 +5931,7 @@ const MINI_CHAT_PAD = 3;
     if (!miniMode) {
       // The main HUD shows the same lines through its own caption style.
       showCaption(item.line);
-      subTimer = setTimeout(nextSubtitle, hold);
+      holdThenExit(item, hold, 0);
       return;
     }
     const { box, link, text: span } = miniChatEls();
@@ -5901,14 +5946,7 @@ const MINI_CHAT_PAD = 3;
     box.classList.add('sub-enter');
     setHostHitRegion(true);            // the bubble sits outside the core
     placeMiniChat();
-    subTimer = setTimeout(() => {
-      box.classList.remove('sub-enter');
-      box.classList.add('sub-exit');
-      subTimer = setTimeout(() => {
-        box.classList.remove('sub-exit');
-        nextSubtitle();
-      }, SUB_FADE_MS);
-    }, hold);
+    holdThenExit(item, hold, 0);
   }
 
   // Older callers (speech captions) feed the same queue.
@@ -7012,7 +7050,7 @@ const MINI_CHAT_PAD = 3;
       aiThinking = false;
       spokenSoFar = spokenSoFar ? spokenSoFar + ' ' + words : words;
       if (miniMode) {
-        if (captionEnabled) window.__showMiniChat(words, 60000);
+        if (window.__queueSubtitle) window.__queueSubtitle(words, '大賢者', { audio: true });
       } else {
         showCaption(spokenSoFar);
       }
@@ -7144,9 +7182,8 @@ const MINI_CHAT_PAD = 3;
         aiThinking = false;
         spokenSoFar = spokenSoFar ? spokenSoFar + ' ' + msg.text : msg.text;
         if (miniMode) {
-          // The overlay bubble is a subtitle: just the words being said
-          // now. The whole reply so far grew into a block over the core.
-          if (captionEnabled) window.__showMiniChat(msg.text, 60000);
+          // The words of the clip starting now, held until it has played.
+          if (window.__queueSubtitle) window.__queueSubtitle(msg.text, '大賢者', { audio: true });
         } else {
           showCaption(spokenSoFar);
         }
