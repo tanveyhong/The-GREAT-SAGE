@@ -2,7 +2,7 @@
 
 APP_MODE = "companion" builds this instead of the XTTS engine. It imports
 no torch, no TTS library and no model - the whole point: Great Sage then
-runs in tens of MB instead of ~2.5GB, and plays pre-made clips for what
+runs in ~625MB (mostly the HUD window) instead of ~2.5GB, and plays pre-made clips for what
 Claude and Codex are doing (core/agent_scenarios) plus the recorded
 voice lines (告, 解, ...) wherever a reply contains their phrase.
 
