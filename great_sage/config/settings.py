@@ -593,7 +593,8 @@ VOICE_ENGINE = "f5"
 # "companion": the Coding Agent Companion - the HUD and overlay voicing
 # Claude and Codex with pre-made clips (core/agent_scenarios). No TTS
 # model, no translator, no wake-word listener and no requirement that
-# Ollama is running: Great Sage idles in tens of MB instead of ~2.5GB.
+# Ollama is running. Measured: ~625MB for the whole process (most of it the
+# HUD window host) against ~2.5GB, plus ~1.15GB of Ollama and ~5GB of VRAM.
 # "full": the original assistant - live cloned voice, translation, wake
 # word. VOICE_ENGINE above only applies in "full".
 APP_MODE = os.environ.get("GREAT_SAGE_MODE", "companion")
