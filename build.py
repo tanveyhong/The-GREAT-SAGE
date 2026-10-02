@@ -85,6 +85,12 @@ def build_overlay():
          "Overlay bundle (Python 3.11 / PySide6 6.4.3)")
 
 
+# --companion: the Coding Agent Companion build (companion.spec) - no
+# torch, TTS or speech recognition, so the voice-stack checks in verify()
+# do not apply and different ones do.
+COMPANION = False
+
+
 def build_app():
     # The HUD page is one big inline script, so a single broken string
     # literal is a SyntaxError that kills ALL of it: the window opens
@@ -101,6 +107,14 @@ def build_app():
                 chr(10) + _script + " failed - refusing to build a bundle "
                 "whose HUD cannot render.")
     _check_locked(APP_DIST)
+    if COMPANION:
+        clips = os.path.join(HERE, "voice_lines", "agent")
+        if not (os.path.isdir(clips) and any(f.endswith(".wav") for f in os.listdir(clips))):
+            raise SystemExit("No scenario clips in voice_lines/agent - run "
+                             "py -m great_sage.voice.make_agent_clips first.")
+        _run([sys.executable, "-m", "PyInstaller", "--noconfirm", "companion.spec"],
+             "Companion bundle (Python 3.14, no voice models)")
+        return
     _run([sys.executable, "-m", "PyInstaller", "--noconfirm", "great_sage.spec"],
          "App bundle (Python 3.14 / torch + F5-TTS)")
 
@@ -145,8 +159,6 @@ def verify():
         ("vendored three.js",
          os.path.exists(os.path.join(internal, "vendor", "three.min.js"))),
         ("voice lines", os.path.isdir(os.path.join(internal, "voice_lines"))),
-        ("reference voice",
-         os.path.isdir(os.path.join(internal, "voice_samples"))),
         ("overlay has its own HUD page",
          os.path.exists(os.path.join(ov_internal, "hud_prototype.html"))),
         # PyInstaller places these under _internal/PySide6/, not at the
@@ -174,7 +186,16 @@ def verify():
     # "Could not import module 'pipeline'", F5-TTS is skipped, and the app
     # runs mute in text-only mode without saying so. Checked here because
     # it is invisible at every other stage.
-    if os.path.isdir(internal):
+    if COMPANION:
+        checks.append(("scenario clips (else: the Companion is silent)",
+                       os.path.isdir(os.path.join(internal, "voice_lines", "agent"))))
+        if os.path.isdir(internal):
+            checks.append(("companion carries no torch (expected)",
+                           not _tree_has(internal, "torch_cpu")))
+    else:
+        checks.append(("reference voice",
+                       os.path.isdir(os.path.join(internal, "voice_samples"))))
+    if os.path.isdir(internal) and not COMPANION:
         for _m in ("torchcodec", "transformers", "torch"):
             checks.append((f"{_m} package metadata (dist-info)",
                            any(d.lower().startswith(_m.replace("-", "_"))
@@ -185,7 +206,7 @@ def verify():
     # neither produces an error the user ever sees: without the torchcodec
     # DLLs a reply is generated with NO SOUND, and without the VAD model
     # push-to-talk records, transcribes to "", and Sage never responds.
-    if os.path.isdir(internal):
+    if os.path.isdir(internal) and not COMPANION:
         # Name the exact files. "some libtorchcodec_* exists" passed while
         # the .pyd was missing, and the build shipped mute a second time.
         _tc = os.path.join(internal, "torchcodec")
@@ -234,7 +255,10 @@ if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("--overlay-only", action="store_true")
     ap.add_argument("--app-only", action="store_true")
+    ap.add_argument("--companion", action="store_true",
+                    help="build the Coding Agent Companion (companion.spec)")
     a = ap.parse_args()
+    COMPANION = a.companion
 
     if not a.app_only:
         build_overlay()

@@ -1553,30 +1553,340 @@ body.mini #canvas-wrap canvas {
 body.mini #mini-chat {
   position: fixed;
   display: none;
-  max-width: 168px;
-  padding: 7px 9px;
-  font: 500 10px/1.45 "Consolas", "Cascadia Mono", monospace;
-  color: #f0f7ff;
-  /* Near-black at 90%, so the desktop reads faintly through it without
-     the text losing contrast - 10% see-through, as asked. */
-  background: rgba(4, 7, 12, 0.90);
-  /* White outline rather than the blue-grey used elsewhere: against an
-     arbitrary desktop a tinted border disappears on some wallpapers. */
-  border: 1px solid rgba(255, 255, 255, 0.72);
+  max-width: 184px;
+  padding: 7px 10px 8px 12px;
+  /* A subtitle, not a terminal: a UI face reads faster than monospace at
+     this size, and the slight tracking keeps 11px legible on any desktop. */
+  font: 500 11px/1.5 "Segoe UI Variable Text", "Segoe UI", sans-serif;
+  letter-spacing: 0.15px;
+  color: #eef6ff;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.8);
+  /* Near-black at ~90%, so the desktop reads faintly through it without
+     the text losing contrast. The faint blue lift at the top ties it to
+     the core's glow. */
+  background:
+    linear-gradient(180deg, rgba(40, 70, 105, 0.35), rgba(40, 70, 105, 0) 60%),
+    rgba(4, 7, 12, 0.90);
+  /* A light outline rather than a tinted one: against an arbitrary
+     desktop a tinted border disappears on some wallpapers. Softer than
+     pure white, with the accent bar carrying the colour instead. */
+  border: 1px solid rgba(225, 238, 255, 0.42);
+  border-left: 2px solid rgba(140, 200, 255, 0.95);
   border-radius: 0;
-  /* Cut corners instead of a radius - the same angular treatment the rest
-     of the HUD's panels use, which reads as "pixel" cut rather than a
-     soft rounded box. */
+  /* Cut corners - the same angular treatment as the HUD's panels. */
   clip-path: polygon(6px 0, 100% 0, 100% calc(100% - 6px),
                      calc(100% - 6px) 100%, 0 100%, 0 6px);
-  box-shadow: 0 3px 12px rgba(0, 0, 0, 0.7);
+  box-shadow: 0 3px 14px rgba(0, 0, 0, 0.7), inset 0 0 12px rgba(120, 180, 255, 0.10);
   z-index: 45;
   opacity: 0;
-  transition: opacity 200ms ease;
+  transform: translateY(3px);
+  transition: opacity 220ms ease, transform 220ms ease;
   pointer-events: none;   /* never steals a drag or a core click */
-  overflow-wrap: anywhere;
+  overflow-wrap: break-word;
 }
-body.mini #mini-chat.show { display: block; opacity: 1; }
+body.mini #mini-chat.show { display: block; opacity: 1; transform: none; }
+/* Activity line: what each Claude/Codex session is doing right now, one
+   row per session (newest first, two at most). It sits on the opposite
+   edge to the speech bubble - placeAgentActivity() picks the edge - and
+   never takes input, like the bubble. */
+#agent-activity { display: none; }
+body.mini #agent-activity {
+  position: fixed;
+  left: 6px; right: 56px;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  z-index: 46;
+  pointer-events: none;
+}
+body.mini #agent-activity .agent-row {
+  padding: 3px 7px 4px 8px;
+  background: rgba(4, 7, 12, 0.82);
+  border-left: 2px solid rgba(140, 200, 255, 0.9);
+  clip-path: polygon(0 0, calc(100% - 5px) 0, 100% 5px, 100% 100%, 0 100%);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.6);
+  opacity: 1;
+  transition: opacity 600ms ease;
+}
+body.mini #agent-activity .agent-row.idle { opacity: 0; }
+body.mini #agent-activity .agent-row[data-kind="ask"] { border-left-color: rgba(255, 196, 92, 0.95); }
+body.mini #agent-activity .agent-row[data-kind="result"][data-text="Tests failed"] { border-left-color: rgba(255, 110, 110, 0.95); }
+body.mini #agent-activity .agent-row[data-kind="done"] { border-left-color: rgba(120, 230, 160, 0.95); }
+
+/* ---- Overlay text, refined --------------------------------------------
+   The bottom text is a SUBTITLE, not a chat box: no panel, no border, no
+   connector to the core - centred white type along the bottom edge with a
+   dark outline that reads on any desktop, a small speaker tag above it,
+   and a thin glowing cue line drawn out from the centre as a line enters.
+   These override the bubble rules above (same specificity, later). */
+body.mini #mini-chat {
+  left: 4px; right: 4px; bottom: 6px; top: auto;
+  max-width: none;
+  padding: 10px 14px 9px;
+  /* A cinematic shade, not a panel: dark at the centre, fully clear at the
+     edges, so the words read on a white page without a visible box. The
+     overlay's Chromium (102) cannot outline text with paint-order, so the
+     shade and the eight-way shadow below do that job. */
+  background: radial-gradient(ellipse at 50% 55%, rgba(0, 0, 0, 0.62) 0%,
+                              rgba(0, 0, 0, 0.42) 42%, rgba(0, 0, 0, 0) 72%);
+  border: 0;
+  clip-path: none;
+  box-shadow: none;
+  text-align: center;
+  font: 600 12.5px/1.38 "Segoe UI Variable Text", "Segoe UI", sans-serif;
+  letter-spacing: 0.1px;
+  color: #ffffff;
+  text-shadow:
+    1px 0 0 #000, -1px 0 0 #000, 0 1px 0 #000, 0 -1px 0 #000,
+    1px 1px 0 #000, -1px -1px 0 #000, 1px -1px 0 #000, -1px 1px 0 #000,
+    0 2px 6px rgba(0, 0, 0, 0.9), 0 0 12px rgba(0, 0, 0, 0.6);
+}
+body.mini #mini-chat .mini-chat-label {
+  display: block;
+  margin: 0 0 3px;
+  text-align: center;
+  font: 700 7.5px/1 "Segoe UI", sans-serif;
+  letter-spacing: 2.2px;
+  color: rgba(165, 215, 255, 1);
+  text-shadow:
+    1px 0 0 #000, -1px 0 0 #000, 0 1px 0 #000, 0 -1px 0 #000,
+    0 0 6px rgba(0, 0, 0, 0.95);
+}
+@keyframes subtitleCue {
+  0%   { transform: scaleX(0); opacity: 0; }
+  35%  { opacity: 1; }
+  100% { transform: scaleX(1); opacity: 0.35; }
+}
+body.mini #mini-chat::after {
+  inset: auto 22% 0 22%;
+  height: 1px;
+  background: linear-gradient(90deg, transparent, rgba(160, 215, 255, 0.95), transparent);
+  transform: scaleX(0);
+  opacity: 0;
+}
+body.mini #mini-chat.sub-enter::after { animation: subtitleCue 900ms ease-out both; }
+body.mini #mini-chat-link { display: none !important; }
+
+/* Rolling subtitle rows (see showSubtitleRow): up to three, newest at the
+   bottom, older ones a touch dimmer; each collapses away on its own so the
+   rest glide up rather than jump. */
+body.mini #mini-chat #mini-chat-text { display: none; }
+body.mini #mini-chat { font-size: 11.5px; padding-top: 8px; padding-bottom: 8px; }
+body.mini #mini-chat::after { display: none; }
+body.mini #mini-chat .sub-rows { display: flex; flex-direction: column; gap: 3px; }
+body.mini #mini-chat .sub-row {
+  position: relative;
+  overflow: hidden;
+  max-height: 6em;
+  transition: max-height 300ms ease, opacity 300ms ease, transform 300ms ease, filter 300ms ease;
+}
+body.mini #mini-chat .sub-row:not(:last-child) { opacity: 0.74; }
+body.mini #mini-chat .sub-row.sub-enter { animation: subtitleIn 300ms ease-out both; }
+body.mini #mini-chat .sub-row.sub-enter::after {
+  content: '';
+  position: absolute;
+  left: 22%; right: 22%; bottom: 0;
+  height: 1px;
+  background: linear-gradient(90deg, transparent, rgba(160, 215, 255, 0.95), transparent);
+  animation: subtitleCue 900ms ease-out both;
+}
+body.mini #mini-chat .sub-row.sub-leave {
+  max-height: 0;
+  opacity: 0;
+  transform: translateY(-6px);
+  filter: blur(2px);
+}
+body.mini #mini-chat .sub-tag {
+  display: block;
+  margin-bottom: 1px;
+  font: 700 7.5px/1.2 "Segoe UI", sans-serif;
+  letter-spacing: 2.2px;
+  color: rgba(165, 215, 255, 1);
+  text-shadow: 1px 0 0 #000, -1px 0 0 #000, 0 1px 0 #000, 0 -1px 0 #000, 0 0 6px rgba(0, 0, 0, 0.95);
+}
+/* Each line gets its OWN shade, fitted to its text and feathered by a
+   blur: one shared shade under three lines made them read as one merged
+   paragraph. Older lines are smaller and dimmer than the newest. */
+body.mini #mini-chat { background: none; }
+body.mini #mini-chat .sub-rows { gap: 7px; }
+body.mini #mini-chat .sub-line {
+  display: inline-block;
+  position: relative;
+  z-index: 0;
+  max-width: 100%;
+  padding: 2px 10px 3px;
+  text-shadow:
+    1px 0 0 #000, -1px 0 0 #000, 0 1px 0 #000, 0 -1px 0 #000,
+    1px 1px 0 #000, -1px -1px 0 #000, 1px -1px 0 #000, -1px 1px 0 #000,
+    0 2px 3px rgba(0, 0, 0, 0.95), 0 3px 10px rgba(0, 0, 0, 0.7);
+}
+body.mini #mini-chat .sub-line::before {
+  content: '';
+  position: absolute;
+  inset: -1px -4px;
+  z-index: -1;
+  border-radius: 10px;
+  background: rgba(0, 0, 0, 0.6);
+  filter: blur(6px);
+}
+body.mini #mini-chat .sub-tag {
+  display: table;
+  position: relative;
+  z-index: 0;
+  margin: 0 auto 2px;
+  padding: 1px 6px;
+}
+body.mini #mini-chat .sub-tag::before {
+  content: '';
+  position: absolute;
+  inset: 0 -2px;
+  z-index: -1;
+  border-radius: 6px;
+  background: rgba(0, 0, 0, 0.55);
+  filter: blur(4px);
+}
+body.mini #mini-chat .sub-row:not(:last-child) { opacity: 0.62; font-size: 0.92em; }
+/* The one speaker tag, above the lines, with its own small shade. */
+body.mini #mini-chat .mini-chat-label {
+  display: table;
+  position: relative;
+  z-index: 0;
+  margin: 0 auto 4px;
+  padding: 1px 6px;
+}
+body.mini #mini-chat .mini-chat-label:empty { display: none; }
+body.mini #mini-chat .mini-chat-label::before {
+  content: '';
+  position: absolute;
+  inset: 0 -2px;
+  z-index: -1;
+  border-radius: 6px;
+  background: rgba(0, 0, 0, 0.55);
+  filter: blur(4px);
+}
+/* A row from another speaker: a small inline tag before its words. */
+body.mini #mini-chat .sub-line .sub-tag {
+  display: none;
+  margin: 0 6px 0 0;
+  padding: 0;
+  vertical-align: 1px;
+}
+body.mini #mini-chat .sub-line .sub-tag::before { display: none; }
+/* Leaving: fade out completely first, then collapse, so no half-gone
+   line or stray tag lingers beside the next one. */
+body.mini #mini-chat .sub-row.sub-leave {
+  transition: opacity 180ms ease, transform 180ms ease, filter 180ms ease,
+              max-height 260ms ease 180ms;
+}
+
+/* Activity rows: a fade from dark to clear instead of a solid box, a slim
+   status bar, a status dot that pulses while the session works, and the
+   agent's name in its own colour. */
+body.mini #agent-activity { gap: 4px; }
+body.mini #agent-activity .agent-row {
+  position: relative;
+  padding: 3px 12px 4px 15px;
+  background: linear-gradient(90deg, rgba(4, 8, 14, 0.86) 0%, rgba(4, 8, 14, 0.6) 60%,
+                              rgba(4, 8, 14, 0) 100%);
+  clip-path: none;
+  box-shadow: none;
+}
+@keyframes agentPulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.3; } }
+body.mini #agent-activity .agent-row::before {
+  content: '';
+  position: absolute;
+  left: 6px; top: 50%;
+  width: 5px; height: 5px;
+  margin-top: -2.5px;
+  border-radius: 50%;
+  color: rgba(140, 200, 255, 0.95);
+  background: currentColor;
+  box-shadow: 0 0 6px currentColor;
+  animation: agentPulse 1.6s ease-in-out infinite;
+}
+body.mini #agent-activity .agent-row[data-kind="ask"]::before { color: rgba(255, 196, 92, 0.95); }
+body.mini #agent-activity .agent-row[data-text="Tests failed"]::before { color: rgba(255, 110, 110, 0.95); }
+body.mini #agent-activity .agent-row[data-kind="done"]::before {
+  color: rgba(120, 230, 160, 0.95);
+  animation: none;
+}
+body.mini #agent-activity .agent-row[data-agent="claude"] .agent-head { color: rgba(236, 164, 124, 0.95); }
+body.mini #agent-activity .agent-row[data-agent="codex"] .agent-head { color: rgba(143, 227, 199, 0.95); }
+body.mini #agent-activity .agent-text { font-size: 10.5px; }
+/* Rows take clicks (the host lets only their strip through): the row
+   opens the agent's app, the speaker button mutes the project. */
+body.mini #agent-activity .agent-row { pointer-events: auto; cursor: pointer; }
+body.mini #agent-activity .agent-row:hover { background: linear-gradient(90deg, rgba(20, 34, 52, 0.92) 0%,
+                                              rgba(20, 34, 52, 0.66) 60%, rgba(20, 34, 52, 0) 100%); }
+body.mini #agent-activity .agent-mute {
+  position: absolute;
+  right: 4px; top: 50%;
+  transform: translateY(-50%);
+  border: 0;
+  background: none;
+  padding: 2px;
+  font-size: 10px;
+  line-height: 1;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 150ms ease;
+}
+body.mini #agent-activity .agent-row:hover .agent-mute,
+body.mini #agent-activity .agent-row.muted .agent-mute { opacity: 0.9; }
+body.mini #agent-activity .agent-row.muted .agent-text,
+body.mini #agent-activity .agent-row.muted .agent-head { opacity: 0.55; }
+body.mini #agent-activity .agent-head {
+  display: block;
+  font: 600 7.5px/1.2 "Segoe UI", sans-serif;
+  letter-spacing: 1.4px;
+  text-transform: uppercase;
+  color: rgba(150, 205, 255, 0.85);
+}
+body.mini #agent-activity .agent-text {
+  display: block;
+  font: 500 10px/1.35 "Segoe UI Variable Text", "Segoe UI", sans-serif;
+  color: #e6f1ff;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.8);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+/* Subtitle effects: in with a rise, focus and a glow sweep; out with a
+   lift and fade. The queue in script times each line. */
+@keyframes subtitleIn {
+  0%   { opacity: 0; transform: translateY(7px); filter: blur(4px); }
+  60%  { opacity: 1; filter: blur(0); }
+  100% { opacity: 1; transform: none; filter: none; }
+}
+@keyframes subtitleOut {
+  0%   { opacity: 1; transform: none; filter: none; }
+  100% { opacity: 0; transform: translateY(-6px); filter: blur(3px); }
+}
+@keyframes subtitleSweep {
+  0%   { transform: translateX(-110%); opacity: 0; }
+  30%  { opacity: 1; }
+  100% { transform: translateX(110%); opacity: 0; }
+}
+body.mini #mini-chat::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background: linear-gradient(100deg, transparent 30%, rgba(160, 215, 255, 0.28) 50%, transparent 70%);
+  transform: translateX(-110%);
+  opacity: 0;
+}
+body.mini #mini-chat.sub-enter { animation: subtitleIn 300ms ease-out both; }
+body.mini #mini-chat.sub-enter::after { animation: subtitleSweep 750ms ease-out 140ms both; }
+body.mini #mini-chat.sub-exit { animation: subtitleOut 300ms ease-in both; }
+body.mini #mini-chat .mini-chat-label {
+  display: block;
+  margin-bottom: 3px;
+  font: 600 8.5px/1 "Segoe UI", sans-serif;
+  letter-spacing: 2px;
+  color: rgba(150, 205, 255, 0.85);
+  text-shadow: 0 0 6px rgba(120, 190, 255, 0.6);
+}
 
 body.mini #mini-chat-link {
   position: fixed;
@@ -1697,7 +2007,8 @@ body.mini:hover #mini-exit { opacity: 1; }
      triangle because it has to reach from the bubble back to the core at
      whatever angle the bubble ends up on. -->
 <svg id="mini-chat-link" class="mini-keep" aria-hidden="true"></svg>
-<div id="mini-chat" class="mini-keep"><span id="mini-chat-text"></span></div>
+<div id="agent-activity" class="mini-keep" aria-live="polite"></div>
+<div id="mini-chat" class="mini-keep"><span class="mini-chat-label">大賢者</span><span id="mini-chat-text"></span><div class="sub-rows"></div></div>
 
 <div id="core-pole"></div>
 
@@ -2125,6 +2436,36 @@ body.mini:hover #mini-exit { opacity: 1; }
         <input type="checkbox" id="startup-greeting-toggle" checked>
         Play "Good morning" greeting on startup
       </label>
+
+      <h4>CODING AGENTS</h4>
+      <div id="agent-voice-settings">
+        <label>
+          <input type="checkbox" data-agent-voice="translate" checked>
+          Translate speech to Japanese
+        </label>
+        <div class="setting-hint">Off: Claude and Codex activity plays pre-made Great
+          Sage clips (working, tests passed, done, needs you...) - nothing is
+          translated or synthesized, and the voice model is unloaded, freeing GPU
+          and RAM. Full text stays on the overlay.</div>
+        <label>
+          <input type="checkbox" data-agent-voice="claude" checked>
+          Speak Claude replies
+        </label>
+        <label>
+          <input type="checkbox" data-agent-voice="codex" checked>
+          Speak Codex replies
+        </label>
+        <label>
+          <input type="checkbox" data-agent-voice="narrate" checked>
+          Speak progress notes ("Now running the tests.")
+        </label>
+        <label>
+          <input type="checkbox" data-agent-voice="cues" checked>
+          Progress cue sounds (recorded clips)
+        </label>
+        <div class="setting-hint">Applies at once - no need to save. Notes still
+          show on the overlay's activity line when not spoken.</div>
+      </div>
 
       <h4>CAPTION</h4>
       <label>
@@ -5577,13 +5918,6 @@ Hey Ciel</textarea>
   // window.screenX/screenY give the window's own position on the desktop,
   // which is what decides this - the page cannot otherwise know where it
   // is. No Python round trip needed.
-  const MINI_CHAT_MS = 9000;      // how long a reply stays up
-  // Tight to the corner. It used to sit 8px in, which read as floating
-// loose in the middle of nothing once the window became transparent -
-// with no visible window there is no edge for it to relate to except
-// the visuals themselves.
-const MINI_CHAT_PAD = 3;
-  let miniChatTimer = null;
 
   function miniChatEls() {
     return {
@@ -5601,53 +5935,185 @@ const MINI_CHAT_PAD = 3;
   }
 
   function placeMiniChat() {
+    // A subtitle: the CSS pins it along the bottom edge, with no connector
+    // to the core - clear anything the old bubble placement left inline.
     const { box, link } = miniChatEls();
-    if (!box || !link || !box.classList.contains('show')) return;
-    const vw = window.innerWidth, vh = window.innerHeight;
-
-    // Which half of the screen is the overlay sitting in? Compare the
-    // window's centre against the screen's, and put the bubble on the
-    // opposite side - that is the side with room.
-    let sx = 0, sy = 0, sw = 0, sh = 0;
-    try {
-      sx = window.screenX; sy = window.screenY;
-      sw = window.screen.availWidth || window.screen.width;
-      sh = window.screen.availHeight || window.screen.height;
-    } catch (err) { /* fall through to the centred default below */ }
-    const onRight = sw ? (sx + vw / 2) > sw / 2 : false;
-    const onBottom = sh ? (sy + vh / 2) > sh / 2 : false;
-
-    const w = box.offsetWidth, h = box.offsetHeight;
-    // Toward the screen centre: hug the opposite edge of the window.
-    const left = onRight ? MINI_CHAT_PAD : vw - w - MINI_CHAT_PAD;
-    const top = onBottom ? MINI_CHAT_PAD : vh - h - MINI_CHAT_PAD;
-    box.style.left = left + 'px';
-    box.style.top = top + 'px';
-
-    // Connector: from the bubble's core-facing corner back to the core.
-    const cx = vw / 2, cy = vh / 2;
-    const ax = onRight ? left + w : left;          // anchor on the inner edge
-    const ay = top + h / 2;
-    link.setAttribute('viewBox', `0 0 ${vw} ${vh}`);
-    link.innerHTML =
-      `<line x1="${ax.toFixed(1)}" y1="${ay.toFixed(1)}" `
-      + `x2="${cx.toFixed(1)}" y2="${cy.toFixed(1)}"/>`
-      + `<circle cx="${ax.toFixed(1)}" cy="${ay.toFixed(1)}" r="1.8"/>`;
+    if (box) { box.style.left = ''; box.style.top = ''; }
+    if (link) link.innerHTML = '';
   }
 
-  function showMiniChat(text) {
-    const { box, link, text: span } = miniChatEls();
-    if (!box || !span) return;
-    span.textContent = text;
+  // ---- Subtitles -------------------------------------------------------
+  // Everything the overlay says in text - the agents' notes, their
+  // replies, scenario captions - goes through one queue and is shown a
+  // short line at a time: in with a rise, focus and glow sweep, held for
+  // its length, out with a lift and fade, then the next. A long reply is
+  // never one paragraph: it is split at sentences (then commas) and only
+  // its opening lines are shown. When lines pile up they are held for
+  // less, and routine lines are dropped before replies.
+  const SUB_MAX_CHARS = 70;
+  const SUB_QUEUE_MAX = 8;
+  const SUB_FADE_MS = 300;
+  const subQueue = [];
+
+  function subtitleLines(text, maxLines) {
+    const clean = String(text || '').replace(/\s+/g, ' ').trim();
+    if (!clean) return [];
+    const sentences = clean.match(/[^.!?。！？]+[.!?。！？]*/g) || [clean];
+    const lines = [];
+    for (let sentence of sentences) {
+      sentence = sentence.trim();
+      while (sentence.length > SUB_MAX_CHARS) {
+        let cut = sentence.lastIndexOf(', ', SUB_MAX_CHARS);
+        if (cut < SUB_MAX_CHARS / 3) cut = sentence.lastIndexOf(' ', SUB_MAX_CHARS);
+        if (cut <= 0) cut = SUB_MAX_CHARS;
+        lines.push(sentence.slice(0, cut + 1).trim());
+        sentence = sentence.slice(cut + 1).trim();
+      }
+      if (sentence) lines.push(sentence);
+    }
+    if (maxLines && lines.length > maxLines) {
+      const kept = lines.slice(0, maxLines);
+      kept[maxLines - 1] = kept[maxLines - 1].replace(/[.。]?$/, '…');
+      return kept;
+    }
+    return lines;
+  }
+
+  // Rolling rows: up to SUB_VISIBLE lines on screen, newest at the bottom.
+  // Each line enters on its own, lives for its own hold, and leaves on its
+  // own; a new line past the limit retires the oldest early. Lines are
+  // released at least SUB_GAP_MS apart so a burst still reads in rhythm.
+  const SUB_VISIBLE = 3;
+  const SUB_GAP_MS = 700;
+  const subRows = [];          // { item, el, timer, leaving }
+  let subLastShown = 0;
+  let subPump = null;
+
+  function queueSubtitle(text, label, opts) {
+    if (!captionEnabled) return;
+    const options = opts || {};
+    const items = subtitleLines(text, options.maxLines).map((line) => ({
+      line, label: label || '大賢者', keep: !!options.keep || !!options.audio, audio: !!options.audio,
+    }));
+    if (options.audio) {
+      subQueue.unshift(...items);   // the clip starting now goes first
+    } else {
+      subQueue.push(...items);
+    }
+    while (subQueue.length > SUB_QUEUE_MAX) {
+      const routine = subQueue.findIndex((item) => !item.keep);
+      subQueue.splice(routine >= 0 ? routine : 0, 1);
+    }
+    pumpSubtitles(!!options.audio);
+  }
+
+  function pumpSubtitles(now) {
+    clearTimeout(subPump);
+    if (!subQueue.length) return;
+    const wait = now ? 0 : SUB_GAP_MS - (Date.now() - subLastShown);
+    if (wait > 0) { subPump = setTimeout(() => pumpSubtitles(false), wait); return; }
+    showSubtitleRow(subQueue.shift());
+    if (subQueue.length) subPump = setTimeout(() => pumpSubtitles(false), SUB_GAP_MS);
+  }
+
+  function subtitleHold(line) {
+    let hold = Math.min(6500, Math.max(2500, 1400 + 55 * line.length));
+    if (subQueue.length > 3) hold *= 0.7;   // catching up
+    return hold;
+  }
+
+  // Is any speech audio still sounding? Clip elements or streamed chunks.
+  function speechSounding() {
+    return speechAudios.some((el) => el.src && !el.paused && !el.ended)
+      || speechStreams.size > 0;
+  }
+
+  function showSubtitleRow(item) {
+    subLastShown = Date.now();
+    if (!miniMode) {
+      // The main HUD shows the same lines through its own caption style.
+      showCaption(item.line);
+      return;
+    }
+    const { box, link } = miniChatEls();
+    const rows = box && box.querySelector('.sub-rows');
+    if (!rows) return;
+    const el = document.createElement('div');
+    el.className = 'sub-row sub-enter';
+    const words = document.createElement('span');
+    words.className = 'sub-line';
+    const tag = document.createElement('span');
+    tag.className = 'sub-tag';      // shown only when this row's speaker
+    tag.textContent = item.label;   // differs from the newest row's
+    words.append(tag, document.createTextNode(item.line));
+    el.appendChild(words);
+    rows.appendChild(el);
+    const row = { item, el, timer: null, leaving: false };
+    subRows.push(row);
     box.classList.add('show');
-    link.classList.add('show');
-    setHostHitRegion(true);      // the bubble sits outside the core
-    // Measured after the text is in, or offsetWidth is the old size and
-    // the bubble lands a few pixels off.
+    if (link) link.classList.remove('show');
+    // Not interactive: the overlay stays click-through around it.
     placeMiniChat();
-    clearTimeout(miniChatTimer);
-    miniChatTimer = setTimeout(hideMiniChat, MINI_CHAT_MS);
+    const live = subRows.filter((r) => !r.leaving);
+    if (live.length > SUB_VISIBLE) retireSubtitleRow(live[0]);
+    refreshSubtitleTags();
+    holdRow(row, subtitleHold(item.line), 0);
   }
+
+  // ONE speaker tag above the lines, naming the newest line's speaker; a
+  // line from someone else carries a small tag of its own. A tag per row
+  // showed the same name twice while one row left and the next arrived.
+  function refreshSubtitleTags() {
+    const { box } = miniChatEls();
+    if (!box) return;
+    const live = subRows.filter((r) => !r.leaving);
+    const newest = live.length ? live[live.length - 1].item.label : '';
+    const header = box.querySelector('.mini-chat-label');
+    if (header) header.textContent = newest;
+    subRows.forEach((r) => {
+      const tag = r.el.querySelector('.sub-tag');
+      if (tag) tag.style.display = r.item.label !== newest ? 'inline-block' : 'none';
+    });
+  }
+
+  // A clip's caption stays until its audio has finished (plus a beat).
+  function holdRow(row, hold, waited) {
+    row.timer = setTimeout(() => {
+      if (row.item.audio && speechSounding() && waited < 20000) {
+        holdRow(row, 200, waited + hold);
+        return;
+      }
+      if (row.item.audio && hold === 200) {
+        row.timer = setTimeout(() => retireSubtitleRow(row), 350);
+        return;
+      }
+      retireSubtitleRow(row);
+    }, hold);
+  }
+
+  function retireSubtitleRow(row) {
+    if (row.leaving) return;
+    row.leaving = true;
+    clearTimeout(row.timer);
+    row.el.classList.remove('sub-enter');
+    row.el.classList.add('sub-leave');
+    refreshSubtitleTags();
+    setTimeout(() => {
+      row.el.remove();
+      const at = subRows.indexOf(row);
+      if (at >= 0) subRows.splice(at, 1);
+      if (!subRows.length && !subQueue.length && miniMode) hideMiniChat();
+    }, SUB_FADE_MS + 260);   // fade out, then collapse (see .sub-leave)
+  }
+
+  // Older callers (speech captions) feed the same queue.
+  function showMiniChat(text) {
+    queueSubtitle(text, '大賢者');
+  }
+  // The queue times its own lines; nothing to release early.
+  function releaseMiniChat() {}
+  window.__releaseMiniChat = releaseMiniChat;
+  window.__queueSubtitle = queueSubtitle;
 
   function hideMiniChat() {
     const { box, link } = miniChatEls();
@@ -5656,6 +6122,107 @@ const MINI_CHAT_PAD = 3;
     // Back to core-only, unless the menu is still open over it.
     setHostHitRegion(!!wheelOpen);
   }
+  // ---- Activity line --------------------------------------------------
+  // One row per agent session: its latest note or step. Rows go idle (fade)
+  // after AGENT_ACTIVITY_IDLE_MS without news and are dropped once faded.
+  const AGENT_ACTIVITY_IDLE_MS = 20000;
+  const AGENT_ACTIVITY_ROWS = 2;
+  const agentSessions = new Map();   // key -> { agent, session, kind, text, at }
+  let agentActivityTimer = null;
+
+  function placeAgentActivity(box) {
+    // Opposite edge to the bubble, using the same screen-half test as
+    // placeMiniChat: the bubble sits at the top when the overlay is in the
+    // lower half of the screen, so the activity line goes to the bottom.
+    // The subtitle owns the bottom edge, so the activity rows take the top.
+    box.style.top = '4px';
+    box.style.bottom = '';
+  }
+
+  function renderAgentActivity() {
+    const box = document.getElementById('agent-activity');
+    if (!box) return;
+    const now = Date.now();
+    for (const [key, entry] of agentSessions) {
+      if (now - entry.at > AGENT_ACTIVITY_IDLE_MS + 1000) agentSessions.delete(key);
+    }
+    const rows = [...agentSessions.values()].sort((a, b) => b.at - a.at)
+      .slice(0, AGENT_ACTIVITY_ROWS);
+    box.textContent = '';
+    for (const item of rows) {
+      const row = document.createElement('div');
+      row.className = 'agent-row' + (now - item.at > AGENT_ACTIVITY_IDLE_MS ? ' idle' : '');
+      row.dataset.kind = item.kind;
+      row.dataset.text = item.text;
+      row.dataset.agent = String(item.agent || '').toLowerCase();
+      const head = document.createElement('span');
+      head.className = 'agent-head';
+      head.textContent = item.agent + ' · ' + item.session;
+      const text = document.createElement('span');
+      text.className = 'agent-text';
+      text.textContent = item.text;
+      // Mute this project's voice; it stays on the activity line.
+      const muted = mutedProjects.has(item.session);
+      const mute = document.createElement('button');
+      mute.className = 'agent-mute';
+      mute.title = muted ? 'Unmute this project' : 'Mute this project';
+      mute.textContent = muted ? '🔇' : '🔊';
+      mute.addEventListener('click', (event) => {
+        event.stopPropagation();
+        if (ws && ws.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify({ type: 'mute_project', label: item.session, muted: !muted }));
+        }
+      });
+      if (muted) row.classList.add('muted');
+      // Click the row: bring that agent's app to the front.
+      row.title = 'Open ' + item.agent;
+      row.addEventListener('click', () => {
+        if (ws && ws.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify({ type: 'focus_agent', agent: item.agent }));
+        }
+      });
+      row.append(head, text, mute);
+      box.append(row);
+    }
+    placeAgentActivity(box);
+    reportRowsBand(box, rows.length);
+    clearTimeout(agentActivityTimer);
+    if (agentSessions.size) agentActivityTimer = setTimeout(renderAgentActivity, 1000);
+  }
+
+  const mutedProjects = new Set();
+  window.__setMutedProjects = (names) => {
+    mutedProjects.clear();
+    (names || []).forEach((name) => mutedProjects.add(name));
+    renderAgentActivity();
+  };
+
+  // Tell the overlay host which strip the rows cover, so clicks there reach
+  // them while the rest of the overlay stays click-through. Sent through the
+  // window title, like the other host signals.
+  let lastRowsBand = '';
+  function reportRowsBand(box, count) {
+    if (!IS_STANDALONE_OVERLAY) return;
+    let band = '0,0,0,0';
+    if (count) {
+      const r = box.getBoundingClientRect();
+      band = [r.left, r.top, r.right, r.bottom].map((v) => Math.round(v)).join(',');
+    }
+    if (band === lastRowsBand) return;
+    lastRowsBand = band;
+    document.title = 'GS_HIT_ROWS:' + band;
+    setTimeout(() => { document.title = 'GreatSageOverlay'; }, 50);
+  }
+
+  window.__showAgentActivity = (msg) => {
+    if (!msg || !msg.text) return;
+    agentSessions.set(msg.key || (msg.agent + msg.session), {
+      agent: msg.agent || 'Agent', session: msg.session || '',
+      kind: msg.kind || 'step', text: msg.text, at: Date.now(),
+    });
+    renderAgentActivity();
+  };
+
   window.__showMiniChat = showMiniChat;
   window.__hideMiniChat = hideMiniChat;
   window.__placeMiniChat = placeMiniChat;
@@ -6575,13 +7142,16 @@ const MINI_CHAT_PAD = 3;
     const voiceLineAudio = el;   // the rest of this function acts on it
     voiceLineAudio.src = url;
     voiceLineAudio.currentTime = 0;
+    voiceLineAudio.stoppedBySpeechKey = false;
 
     // Exactly one ack per clip. Python clears its wait flag before each
     // send, so a duplicate arriving late would unblock the NEXT clip
     // early and cut it off - hence the latch rather than a bare send.
     let acked = false;
     const ack = () => {
-      if (acked) return;
+      // A clip the stop key silenced must not ack: that would land on the
+      // NEXT clip's wait and cut it short.
+      if (acked || voiceLineAudio.stoppedBySpeechKey) return;
       acked = true;
       // The url is NOT revoked here. Each element releases its own
       // previous url on its next use instead, which stays correct whether
@@ -6637,9 +7207,121 @@ const MINI_CHAT_PAD = 3;
       });
   }
 
+  // ---- Streamed speech -------------------------------------------------
+  // The Japanese voice sends a reply as a stream of raw 16-bit PCM chunks
+  // while XTTS is still generating. Each chunk is scheduled on the
+  // AudioContext timeline exactly where the previous one ends, so sentences
+  // join with no seam - two <audio> elements taking turns clipped the start
+  // of every clip. A chunk that arrives late starts a moment later: a pause,
+  // never a cut. The stream acks once, when its last chunk has played.
+  const STREAM_LEAD_S = 0.08;        // first chunk: room for scheduling jitter
+  let streamGain = null;
+  const speechStreams = new Map();   // stream id -> { next, sources, stopped }
+
+  function streamOutput() {
+    if (!streamGain) {
+      streamGain = audioCtx.createGain();
+      streamGain.connect(analyser);  // the pulse follows streamed speech too
+    }
+    streamGain.gain.value = voiceLineAudio.volume;  // same volume as clips
+    return streamGain;
+  }
+
+  function pcm16ToBuffer(b64, rate) {
+    const bin = atob(b64);
+    const frames = bin.length >> 1;
+    const buffer = audioCtx.createBuffer(1, Math.max(1, frames), rate);
+    const channel = buffer.getChannelData(0);
+    for (let i = 0; i < frames; i++) {
+      let v = bin.charCodeAt(2 * i) | (bin.charCodeAt(2 * i + 1) << 8);
+      if (v >= 0x8000) v -= 0x10000;
+      channel[i] = v / 32768;
+    }
+    return buffer;
+  }
+
+  function sendStreamAck() {
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ type: 'audio_ended' }));
+    }
+  }
+
+  function scheduleStreamCaption(words, delayMs) {
+    setTimeout(() => {
+      if (!captionFollowsSpeech) return;
+      aiThinking = false;
+      spokenSoFar = spokenSoFar ? spokenSoFar + ' ' + words : words;
+      if (miniMode) {
+        if (window.__queueSubtitle) window.__queueSubtitle(words, '大賢者', { audio: true });
+      } else {
+        showCaption(spokenSoFar);
+      }
+    }, delayMs);
+  }
+
+  function playStreamChunk(msg) {
+    let stream = speechStreams.get(msg.stream);
+    if (!stream) {
+      stream = { next: 0, sources: new Set(), stopped: false };
+      speechStreams.set(msg.stream, stream);
+    }
+    if (stream.stopped) return;
+    if (!sfxToggle.checked) {
+      // Sound off: captions still follow, and Python must not hang.
+      if (msg.text) scheduleStreamCaption(msg.text, 0);
+      if (msg.final) { speechStreams.delete(msg.stream); sendStreamAck(); }
+      return;
+    }
+    if (audioCtx.state === 'suspended') audioCtx.resume().catch(() => {});
+    const now = audioCtx.currentTime;
+    if (stream.next < now + 0.02) stream.next = now + STREAM_LEAD_S;
+    const startAt = stream.next;
+    if (msg.data) {
+      const buffer = pcm16ToBuffer(msg.data, msg.rate || 24000);
+      const source = audioCtx.createBufferSource();
+      source.buffer = buffer;
+      source.connect(streamOutput());
+      source.start(startAt);
+      stream.sources.add(source);
+      source.onended = () => stream.sources.delete(source);
+      stream.next = startAt + buffer.duration;
+    }
+    if (msg.text) scheduleStreamCaption(msg.text, Math.max(0, (startAt - now) * 1000));
+    if (msg.final) {
+      const remainingMs = Math.max(0, (stream.next - audioCtx.currentTime) * 1000);
+      setTimeout(() => {
+        if (speechStreams.get(msg.stream) === stream) speechStreams.delete(msg.stream);
+        if (!stream.stopped) sendStreamAck();
+      }, remainingMs + 30);
+    }
+  }
+
+  // Settings > CODING AGENTS. Only a real click sends: the generic settings
+  // restore skips these (isVoiceListInput), and the server's
+  // agent_voice_state sets them without firing anything.
+  document.querySelectorAll('[data-agent-voice]').forEach((box) => {
+    box.addEventListener('change', (event) => {
+      if (!event.isTrusted || !ws || ws.readyState !== WebSocket.OPEN) return;
+      ws.send(JSON.stringify({ type: 'set_agent_voice', key: box.dataset.agentVoice, on: box.checked }));
+    });
+  });
+
+  function stopSpeechStreams() {
+    for (const stream of speechStreams.values()) {
+      stream.stopped = true;
+      stream.sources.forEach((source) => { try { source.stop(); } catch (err) { /* already ended */ } });
+    }
+    speechStreams.clear();
+  }
+
   function handleServerMessage(event) {
     const msg = JSON.parse(event.data);
-    if (msg.type === 'reply_chunk') {
+    if (msg.type === 'codex_voice_start') {
+      replyBuffer = '';
+      spokenSoFar = '';
+      speechInProgress = true;
+      aiThinking = false;
+    } else if (msg.type === 'reply_chunk') {
       speechInProgress = true;
       replyBuffer += msg.text;
       if (captionFollowsSpeech) {
@@ -6667,13 +7349,48 @@ const MINI_CHAT_PAD = 3;
         saveChats();
         maybeNameChat(currentTopic());
       }
+    } else if (msg.type === 'mute_state') {
+      if (window.__setMutedProjects) window.__setMutedProjects(msg.muted);
+    } else if (msg.type === 'agent_voice_state') {
+      // Server-owned switches: reflect them, never echo them back.
+      document.querySelectorAll('[data-agent-voice]').forEach((box) => {
+        const key = box.dataset.agentVoice;
+        if (typeof msg[key] === 'boolean') box.checked = msg[key];
+        // The Companion has no translator or TTS model to turn on.
+        if (key === 'translate') box.disabled = !!msg.companion;
+      });
+    } else if (msg.type === 'audio_chunk') {
+      playStreamChunk(msg);
+    } else if (msg.type === 'agent_activity') {
+      if (msg.kind === 'reply' || msg.kind === 'note') {
+        // Text for the subtitles, not the activity line.
+        const who = ((msg.agent || '') + ' · ' + (msg.session || '')).toUpperCase();
+        if (window.__queueSubtitle) {
+          window.__queueSubtitle(msg.text, who, msg.kind === 'reply' ? { maxLines: 3, keep: true } : null);
+        }
+        if (msg.kind === 'reply') return;
+      }
+      if (window.__showAgentActivity) window.__showAgentActivity(msg);
+    } else if (msg.type === 'stop_audio') {
+      // The stop-speech key. Silence both speech elements now; the server
+      // has already stopped waiting on their acks and sends speaking_done.
+      for (const el of [voiceLineAudio, voiceLineAudioB]) {
+        el.stoppedBySpeechKey = true;
+        el.pause();
+      }
+      stopSpeechStreams();
     } else if (msg.type === 'audio') {
       // The words in THIS clip, revealed as it starts playing, so the
       // caption tracks the voice instead of racing ahead of it.
       if (captionFollowsSpeech && msg.text) {
         aiThinking = false;
         spokenSoFar = spokenSoFar ? spokenSoFar + ' ' + msg.text : msg.text;
-        showCaption(spokenSoFar);
+        if (miniMode) {
+          // The words of the clip starting now, held until it has played.
+          if (window.__queueSubtitle) window.__queueSubtitle(msg.text, '大賢者', { audio: true });
+        } else {
+          showCaption(spokenSoFar);
+        }
       }
       if (sfxToggle.checked) {
         playServerAudio(msg.data, msg.mime);
@@ -6683,6 +7400,7 @@ const MINI_CHAT_PAD = 3;
         ws.send(JSON.stringify({ type: 'audio_ended' }));
       }
     } else if (msg.type === 'speaking_done') {
+      if (miniMode && window.__releaseMiniChat) window.__releaseMiniChat(2500);
       // Safety net for a reply that was never voiced at all - voice
       // disabled, SFX off, or synthesis failed - so the text still
       // reaches the screen instead of the reply finishing invisibly.
@@ -9583,7 +10301,10 @@ const MINI_CHAT_PAD = 3;
     // #voice-input-settings (wake-word toggle + phrases) is excluded too -
     // that state is server-authoritative via its own "wake_word_settings"
     // message/dedicated hud_settings.json keys, not the generic blob.
+    // #agent-voice-settings likewise: the server owns those switches (the
+    // relay and cue config files) and sends them as "agent_voice_state".
     return !!(
+      el.closest('#agent-voice-settings') ||
       el.closest('#voice-lines-list') ||
       el.closest('#voice-candidates-list') ||
       el.closest('#voice-fx-settings') ||

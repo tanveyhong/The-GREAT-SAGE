@@ -50,11 +50,17 @@ def _configure_logging() -> None:
     nowhere at all. That is why the packaged build's voice failure looked
     like silence rather than an error.
     """
+    handlers = [logging.FileHandler(LOG_PATH, mode="a", encoding="utf-8")]
+    # No console under pythonw or a windowed exe: sys.stdout is None, and a
+    # handler on it fails every record. Logging's error report for that
+    # quotes the source line to a cp1252 stderr, and a line holding
+    # Japanese text raised from inside the report and stopped startup.
+    if sys.stdout is not None:
+        handlers.append(logging.StreamHandler(sys.stdout))
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-        handlers=[logging.FileHandler(LOG_PATH, mode="a", encoding="utf-8"),
-                  logging.StreamHandler(sys.stdout)],
+        handlers=handlers,
         force=True,
     )
 

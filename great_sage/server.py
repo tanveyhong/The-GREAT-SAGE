@@ -152,6 +152,7 @@ import dataclasses
 import json
 import logging
 import os
+from pathlib import Path
 import queue
 import subprocess
 import sys
@@ -392,7 +393,7 @@ def _apply_voice_provider(voice):
             pass
 
 
-def _apply_mode(engine, cfg, send_json=None):
+def _apply_mode(engine, cfg, send_json=None, voice=None):
     """Put a mode's limits into effect (spec S39/S40).
 
     The one that does real work is GAMING: keep_alive 0 means Ollama drops
@@ -410,6 +411,16 @@ def _apply_mode(engine, cfg, send_json=None):
             # Do not wait for the next reply to finish - the point of the
             # mode is to free the card NOW.
             threading.Thread(target=provider.unload, daemon=True).start()
+    # The Japanese voice's translator is its own provider instance and
+    # follows the same rule: held while coding, gone at once when the mode
+    # wants the GPU back.
+    translator = getattr(voice, "translator", None)
+    if translator is not None and hasattr(translator, "keep_alive"):
+        translator.keep_alive = (
+            getattr(settings, "JAPANESE_TRANSLATOR_KEEP_ALIVE_SECONDS", None)
+            if mode.keep_model_loaded else 0)
+        if not mode.keep_model_loaded and hasattr(translator, "unload"):
+            threading.Thread(target=translator.unload, daemon=True).start()
     log.info("Mode: %s (model resident=%s, hud fps=%s, wake word=%s, "
              "web=%s, online=%s)", mode.label, mode.keep_model_loaded,
              mode.hud_fps or "normal", mode.wake_word, mode.allow_web,
@@ -898,6 +909,104 @@ async def run_server(engine, voice) -> None:
             except Exception:
                 log.exception("Could not restore saved voice FX - continuing dry")
 
+    # --- Coding-agent voice switches (Settings > CODING AGENTS) -----------
+    # Each lives where its relay already reads it, so the .cmd toggles and
+    # the panel stay in step: the relay configs, progress_cues.json, and the
+    # HUD settings for translation (engine state, applied here at startup).
+    from great_sage.core import claude_voice as _claude_cfg
+    from great_sage.core import codex_voice as _codex_cfg
+    from great_sage.core import progress_cues as _cues_cfg
+
+    companion = bool(getattr(voice, "companion", False))
+    if voice is not None and hasattr(voice, "translate_enabled") and not companion:
+        voice.translate_enabled = bool(
+            hud_settings.load(settings.HUD_SETTINGS_PATH).get("voice_translate", True))
+
+    def _write_json(path, cfg):
+        temporary = path.with_suffix(".tmp")
+        temporary.write_text(json.dumps(cfg, indent=2), encoding="utf-8")
+        temporary.replace(path)
+
+    def _agent_voice_state():
+        cues = _cues_cfg.load_config()
+        return {
+            "type": "agent_voice_state",
+            "claude": bool(_claude_cfg.load_config().get("enabled")),
+            "codex": bool(_codex_cfg.load_config().get("enabled")),
+            "narrate": bool(cues.get("narrate", True)),
+            "cues": bool(cues.get("enabled")),
+            "translate": bool(getattr(voice, "translate_enabled", True)),
+            # The Companion has no translator or TTS model to switch on.
+            "companion": companion,
+        }
+
+    def _set_agent_voice(key, on):
+        if key in ("claude", "codex"):
+            module = _claude_cfg if key == "claude" else _codex_cfg
+            cfg = module.load_config()
+            cfg["enabled"] = on
+            _write_json(module.CONFIG, cfg)
+        elif key in ("narrate", "cues"):
+            cfg = _cues_cfg.load_config()
+            cfg["narrate" if key == "narrate" else "enabled"] = on
+            _write_json(_cues_cfg.CONFIG, cfg)
+        elif (key == "translate" and voice is not None and not companion
+              and hasattr(voice, "translate_enabled")):
+            voice.translate_enabled = on
+            saved = hud_settings.load(settings.HUD_SETTINGS_PATH)
+            saved["voice_translate"] = on
+            hud_settings.save(settings.HUD_SETTINGS_PATH, saved)
+            translator = getattr(voice, "translator", None)
+            if not on and translator is not None and hasattr(translator, "unload"):
+                # The point of switching it off is the GPU: free it now.
+                threading.Thread(target=translator.unload, daemon=True).start()
+            # Scenario-clip mode needs no XTTS either; switching back loads
+            # it in the background so the next reply is not the one to wait.
+            swap = getattr(voice, "_ensure_model" if on else "unload_model", None)
+            if swap is not None:
+                threading.Thread(target=swap, daemon=True).start()
+        else:
+            return False
+        log.info("Coding-agent voice: %s %s", key, "on" if on else "off")
+        return True
+
+    # Per-project mute (the overlay's activity rows): kept in
+    # progress_cues.json, which the relays already read every poll.
+    def _mute_state():
+        return {"type": "mute_state",
+                "muted": sorted(_cues_cfg.load_config().get("muted_projects") or [])}
+
+    def _set_project_muted(label, muted):
+        if not label:
+            return
+        cfg = _cues_cfg.load_config()
+        projects = set(cfg.get("muted_projects") or [])
+        (projects.add if muted else projects.discard)(label)
+        cfg["muted_projects"] = sorted(projects)
+        _write_json(_cues_cfg.CONFIG, cfg)
+        log.info("Project %s %s", label, "muted" if muted else "unmuted")
+
+    def _handle_agent_notification(data):
+        from great_sage.core.session_relay import session_key
+        message = str(data.get("message") or "")
+        kind = str(data.get("notification_type") or "")
+        cwd = str(data.get("cwd") or "")
+        label = Path(cwd.rstrip("\\/")).name if cwd else "Claude"
+        permission = kind == "permission_prompt" or "permission" in message.lower()
+        text = message or ("Needs your permission" if permission else "Waiting for your input")
+        _send_activity({"type": "agent_activity", "agent": str(data.get("agent") or "Claude"),
+                        "session": label, "key": session_key(data.get("transcript_path") or cwd),
+                        "kind": "ask", "text": text,
+                        "muted": label in set(_cues_cfg.load_config().get("muted_projects") or [])})
+        log.info("Agent notification (%s): %s", label, text)
+        if not permission or label in set(_cues_cfg.load_config().get("muted_projects") or []):
+            return  # Idle prompts follow a reply that was already announced.
+        # Play off the event loop: playback waits for the page's ack.
+        if _clip_mode():
+            threading.Thread(target=_play_relay_scenario, args=("approval", True), daemon=True).start()
+        else:
+            threading.Thread(target=_play_relay_cue, args=("needs_you",), daemon=True).start()
+
     log_handler = BroadcastLogHandler(loop)
     log_handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s"))
     logging.getLogger().addHandler(log_handler)
@@ -910,6 +1019,149 @@ async def run_server(engine, voice) -> None:
     # find the HUD window's own connection rather than, say, a stray logs
     # viewer that never sends "chat" at all.
     active_connection = {"websocket": None, "sink": None}
+
+    # Voice-only mirror of completed replies from the configured Codex chat
+    # and the newest Claude desktop session. The relays never submit prompts;
+    # the voice may translate locally. One lock, so the two never overlap.
+    relay_speech_lock = threading.Lock()
+
+    # Translation off = scenario-clip mode: the relays synthesize nothing.
+    # Pre-made clips (core/agent_scenarios) stand in for replies, notes and
+    # cues, so neither the translator nor XTTS has to run while coding.
+    def _clip_mode():
+        return voice is not None and not getattr(voice, 'translate_enabled', True)
+
+    def _play_relay_scenario(name, is_reply):
+        if not _clip_mode():
+            return
+        from great_sage.core import agent_scenarios
+        path = agent_scenarios.pick_clip(name)
+        sink = active_connection['sink']
+        if path is None or sink is None:
+            return
+        # A reply's clip waits its turn; a phase clip only fills a silence.
+        if is_reply:
+            if not relay_speech_lock.acquire(timeout=15):
+                return
+        elif getattr(voice, 'speaking', False) or not relay_speech_lock.acquire(blocking=False):
+            return
+        try:
+            import soundfile as sf
+            samples, rate = sf.read(str(path), dtype='float32')
+            fx = getattr(voice, 'fx', None)
+            if fx is not None:
+                fx.begin_utterance()
+                samples = fx.apply(samples, rate)
+            sink.pending_text = agent_scenarios.caption(name, path)
+            sink.play(samples, rate)
+            log.info('Scenario clip: %s (%s)', name, path.name)
+            ws_now = active_connection['websocket']
+            if ws_now is not None:
+                asyncio.run_coroutine_threadsafe(
+                    ws_now.send(json.dumps({'type': 'speaking_done'})), loop)
+        except Exception as exc:
+            log.info('Scenario clip %s skipped: %s', name, exc)
+        finally:
+            relay_speech_lock.release()
+
+    def _speak_relay_reply(text):
+        if _clip_mode():
+            return True  # Its scenario clip already played; nothing to synthesize.
+        with relay_speech_lock:
+            return _speak_relayed_reply(text)
+
+    # An agent's between-steps note. Only into a silence, like a cue: a
+    # note that has to wait is out of date by the time it could be heard.
+    def _speak_relay_narration(text):
+        if _clip_mode():
+            return False  # Scenario clips cover the steps; the line shows the note.
+        if getattr(voice, 'speaking', False) or not relay_speech_lock.acquire(blocking=False):
+            return False
+        try:
+            return _speak_relayed_reply(text, narration=True)
+        finally:
+            relay_speech_lock.release()
+
+    def _speak_relayed_reply(text, narration=False):
+        ws = active_connection['websocket']
+        sink = active_connection['sink']
+        if voice is None or ws is None or sink is None:
+            return False
+        def send(payload):
+            # Whichever window holds the voice route NOW: the reply may have
+            # moved between the HUD and the overlay while it was spoken.
+            current = active_connection['websocket'] or ws
+            asyncio.run_coroutine_threadsafe(
+                current.send(json.dumps(payload)), loop).result(timeout=10)
+        try:
+            voice.set_sink(sink)
+            send({'type': 'codex_voice_start'})
+            if narration:
+                voice.speak(text)  # No opener, no summary: it is one line.
+            elif hasattr(voice, 'speak_codex'):
+                voice.speak_codex(text)
+            elif hasattr(voice, 'speak_stream'):
+                voice.speak_stream(iter([text]))
+            else:
+                voice.speak(text)
+            log.info('Voice relay finished speaking %d characters%s',
+                     len(text), ' of narration' if narration else '')
+        except Exception:
+            log.exception('Could not speak relayed reply')
+            # Do not replay a partially spoken reply automatically.
+        finally:
+            try:
+                send({'type': 'speaking_done'})
+            except Exception:
+                pass
+        return True
+
+    # A progress cue is a single recorded clip, and only ever fills a
+    # silence: one that arrives while anything is being said is dropped,
+    # never queued, because by the time it could play it would be stale.
+    def _play_relay_cue(name):
+        if _clip_mode():
+            return  # The scenario clips replace these.
+        path = getattr(settings, "PROGRESS_CUE_CLIPS", {}).get(name)
+        sink = active_connection['sink']
+        if not path or sink is None or voice is None or getattr(voice, 'speaking', False):
+            return
+        if not relay_speech_lock.acquire(blocking=False):
+            return
+        try:
+            sink.pending_text = None  # A cue carries no caption.
+            sink.play_file(path)
+            log.info('Progress cue: %s', name)
+        except Exception as exc:
+            log.info('Progress cue %s skipped: %s', name, exc)
+        finally:
+            relay_speech_lock.release()
+
+    # The overlay's activity line: what each agent session is doing now.
+    # Every HUD/overlay page gets it, fire-and-forget - it is display only,
+    # and a relay thread must never wait on a slow or closing page.
+    def _send_activity(payload):
+        message = json.dumps(payload)
+        for ws_client in list(voice_clients):
+            try:
+                asyncio.run_coroutine_threadsafe(ws_client.send(message), loop)
+            except Exception:
+                pass
+
+    # A prompt was just sent to an agent, so a reply is coming: load the
+    # translation model now rather than when the reply lands.
+    def _prepare_relay_voice():
+        warm = getattr(voice, 'warm_translator', None)
+        if warm:
+            warm()
+
+    relay_hooks = dict(cue=_play_relay_cue, narrate=_speak_relay_narration,
+                       activity=_send_activity, prepare=_prepare_relay_voice,
+                       scenario=_play_relay_scenario)
+    from great_sage.core.codex_voice import CodexVoiceRelay
+    codex_voice_relay = CodexVoiceRelay(_speak_relay_reply, **relay_hooks)
+    from great_sage.core.claude_voice import ClaudeVoiceRelay
+    claude_voice_relay = ClaudeVoiceRelay(_speak_relay_reply, **relay_hooks)
 
     # Every live connection that could receive a voice reply, by role.
     # Needed because the slot has to FALL BACK, not empty itself: closing
@@ -1096,7 +1348,7 @@ async def run_server(engine, voice) -> None:
             cfg = ai_settings.apply_update(cfg, {"mode": "gaming"})
             ai_settings.save(settings.AI_SETTINGS_PATH, cfg)
             _apply_provider(engine, cfg)
-            _apply_mode(engine, cfg)
+            _apply_mode(engine, cfg, voice=voice)
             log.info("Game detected (%r) - switched to GAMING, will restore "
                      "%s afterwards", title[:60], was.upper())
         else:
@@ -1113,7 +1365,7 @@ async def run_server(engine, voice) -> None:
             cfg = ai_settings.apply_update(cfg, {"mode": back})
             ai_settings.save(settings.AI_SETTINGS_PATH, cfg)
             _apply_provider(engine, cfg)
-            _apply_mode(engine, cfg)
+            _apply_mode(engine, cfg, voice=voice)
             log.info("Game closed - restored %s mode", back.upper())
 
     _watcher = None
@@ -1173,6 +1425,26 @@ async def run_server(engine, voice) -> None:
         except Exception:
             log.exception("Global hotkey unavailable")
 
+    # Stop-speech key: silences whatever is being said and drops relayed
+    # replies still waiting their turn. Nothing else is interrupted.
+    def _stop_speech():
+        codex_voice_relay.clear()
+        claude_voice_relay.clear()
+        if voice is not None:
+            voice.stop()
+        log.info("Stop-speech key pressed")
+
+    _stop_hotkey = None
+    if getattr(settings, "STOP_SPEECH_HOTKEY", ""):
+        try:
+            from great_sage.core.global_hotkey import GlobalHotkey
+            _stop_hotkey = GlobalHotkey(settings.STOP_SPEECH_HOTKEY, _stop_speech)
+            if not _stop_hotkey.start():
+                log.warning("Stop-speech key %s could not be registered",
+                            settings.STOP_SPEECH_HOTKEY)
+        except Exception:
+            log.exception("Stop-speech key unavailable")
+
     def _get_wake_phrases():
         saved = hud_settings.load(settings.HUD_SETTINGS_PATH)
         phrases = saved.get("wake_words")
@@ -1187,7 +1459,11 @@ async def run_server(engine, voice) -> None:
     if saved_mic_device is not None:
         ptt_recorder.device = saved_mic_device
         wake_word_listener.device = saved_mic_device
-    if hud_settings.load(settings.HUD_SETTINGS_PATH).get("wake_word_enabled"):
+    if getattr(voice, "companion", False):
+        # Listening means loading a speech model; the Companion only does so
+        # if Master switches the wake word on himself.
+        log.info("Coding Agent Companion: wake-word listener not started")
+    elif hud_settings.load(settings.HUD_SETTINGS_PATH).get("wake_word_enabled"):
         wake_word_listener.start()
         log.info("Wake-word listener started (restored from settings)")
 
@@ -1253,7 +1529,7 @@ async def run_server(engine, voice) -> None:
                 "type": "mode", "mode": _mode.name, "label": _mode.label,
                 "hud_fps": _mode.hud_fps, "wake_word": _mode.wake_word,
                 "description": _mode.description}))
-            _apply_mode(engine, _cfg)
+            _apply_mode(engine, _cfg, voice=voice)
             await websocket.send(json.dumps({
                 "type": "ai_settings",
                 "settings": ai_settings.public_view(
@@ -1412,7 +1688,7 @@ async def run_server(engine, voice) -> None:
                             current, data.get("settings") or {})
                         ai_settings.save(settings.AI_SETTINGS_PATH, merged)
                         _apply_provider(engine, merged)
-                        _m = _apply_mode(engine, merged)
+                        _m = _apply_mode(engine, merged, voice=voice)
                         await websocket.send(json.dumps({
                             "type": "mode", "mode": _m.name,
                             "label": _m.label, "hud_fps": _m.hud_fps,
@@ -1565,6 +1841,8 @@ async def run_server(engine, voice) -> None:
                     # the standalone overlay has its own.
                     role = str(data.get("role") or "?")[:40]
                     log.info("Client is the %s", role)
+                    await websocket.send(json.dumps(_agent_voice_state()))
+                    await websocket.send(json.dumps(_mute_state()))
                     if role in ("hud", "overlay"):
                         voice_clients[websocket] = (role, sink)
                         _claim_voice_route(websocket, sink)
@@ -1665,6 +1943,32 @@ async def run_server(engine, voice) -> None:
                         saved = hud_settings.load(settings.HUD_SETTINGS_PATH)
                         saved["voice_fx"] = params
                         hud_settings.save(settings.HUD_SETTINGS_PATH, saved)
+                elif msg_type == "agent_notification":
+                    # From the Claude Code Notification hook
+                    # (great_sage/hooks/claude_notify.py): Claude is blocked on
+                    # Master - which never shows in the session log.
+                    _handle_agent_notification(data)
+                elif msg_type == "mute_project":
+                    _set_project_muted(str(data.get("label") or ""), bool(data.get("muted")))
+                    state = json.dumps(_mute_state())
+                    for client in list(all_clients):
+                        try:
+                            await client.send(state)
+                        except Exception:
+                            pass
+                elif msg_type == "focus_agent":
+                    from great_sage.core.window_focus import focus_agent
+                    threading.Thread(target=focus_agent, args=(str(data.get("agent") or ""),),
+                                     daemon=True).start()
+                elif msg_type == "set_agent_voice":
+                    if _set_agent_voice(str(data.get("key")), bool(data.get("on"))):
+                        # Every open window shows the same switches.
+                        state = json.dumps(_agent_voice_state())
+                        for client in list(all_clients):
+                            try:
+                                await client.send(state)
+                            except Exception:
+                                pass
                 elif msg_type == "set_mic_device":
                     index = data.get("index")
                     ptt_recorder.device = index
@@ -1701,4 +2005,10 @@ async def run_server(engine, voice) -> None:
     # on image size is applied in the page before sending.
     async with websockets.serve(handler, HOST, PORT, max_size=16 * 1024 * 1024):
         log.info("WebSocket bridge listening on ws://%s:%s", HOST, PORT)
-        await asyncio.Future()  # run until the process exits
+        codex_voice_relay.start()
+        claude_voice_relay.start()
+        try:
+            await asyncio.Future()  # run until the process exits
+        finally:
+            codex_voice_relay.stop()
+            claude_voice_relay.stop()

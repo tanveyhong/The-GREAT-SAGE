@@ -20,6 +20,32 @@ speech recognition, and the voice.
 Named for the skill in *That Time I Got Reincarnated as a Slime*, and it
 addresses you as Master.
 
+## Coding Agent Companion (the default mode)
+
+Out of the box (`APP_MODE = "companion"` in `great_sage/config/settings.py`)
+Great Sage is a lightweight companion for **Claude Code and Codex**: it
+watches every session on this machine and reacts to what the agents do.
+
+- **Voice lines for what is happening** - starting work, running tests,
+  tests passed or failed, a destructive command, done, needs you - played
+  from pre-made Great Sage clips (`core/agent_scenarios.py`), real
+  recordings first. Nothing is translated or synthesised while you code,
+  so it loads no TTS model, no translator and no speech recogniser, and
+  it does not need Ollama running.
+- **Rolling subtitles** of the agents' notes and replies, and an
+  **activity row** per session (click it to bring the agent's app forward,
+  or mute that project).
+- **Permission alerts** through a Claude Code `Notification` hook
+  (`great_sage/hooks/claude_notify.py`), since permission prompts never
+  reach the session logs.
+- **Replay** a past session into the running Companion to check how it
+  looks and sounds: `py -m great_sage.core.replay`.
+
+The scenario clips clone the voice reference, so they are not in the
+repository: generate them once with `py -m great_sage.voice.make_agent_clips`
+(needs the full install's XTTS). `APP_MODE = "full"` restores the original
+assistant described below.
+
 ## What you need
 
 | | |

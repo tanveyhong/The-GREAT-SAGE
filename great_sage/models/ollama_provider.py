@@ -16,7 +16,7 @@ from great_sage.models.base import Message, ModelProvider, ModelProviderError
 
 class OllamaProvider(ModelProvider):
     def __init__(self, host: str, model: str, timeout: int = 60,
-                 think: bool = False):
+                 think: bool = False, options: dict = None):
         """think=False disables a reasoning model's private deliberation.
 
         This matters enormously for a spoken assistant. Ollama reports a
@@ -40,6 +40,9 @@ class OllamaProvider(ModelProvider):
         self.model = model
         self.timeout = timeout
         self.think = think
+        # Extra Ollama sampling options (e.g. temperature 0 for the voice
+        # translator, which wants the same rendering every time).
+        self.options = dict(options or {})
         # Deliberately above Ollama's 4096 default; see _needed_ctx. The
         # KV cache grows with this, so it is raised where it is needed
         # rather than pinned high for every request.
@@ -61,7 +64,7 @@ class OllamaProvider(ModelProvider):
         body = {"model": self.model, "messages": messages, "stream": stream}
         if self.think is not None:
             body["think"] = self.think
-        body["options"] = {"num_ctx": self._needed_ctx(messages)}
+        body["options"] = {**self.options, "num_ctx": self._needed_ctx(messages)}
         if self.keep_alive is not None:
             body["keep_alive"] = self.keep_alive
         return body
@@ -207,6 +210,26 @@ class OllamaProvider(ModelProvider):
             return True
         except Exception:
             log.warning("Could not unload %s from VRAM", self.model)
+            return False
+
+    def warm(self) -> bool:
+        """Load the model into VRAM ahead of a request that is coming.
+
+        The same zero-token request as unload(), with the normal keep_alive
+        instead of 0. Loading took 4-5s of the first reply's latency after
+        the model had idled out.
+        """
+        # The same options a real request sends: a different num_ctx makes
+        # Ollama reload the model, which would undo the warming entirely.
+        body = {"model": self.model,
+                "options": {**self.options, "num_ctx": self.base_num_ctx}}
+        if self.keep_alive is not None:
+            body["keep_alive"] = self.keep_alive
+        try:
+            requests.post(f"{self.host}/api/generate", timeout=60, json=body)
+            return True
+        except Exception:
+            log.warning("Could not preload %s", self.model)
             return False
 
     def chat_raw(self, messages, tools=None):

@@ -14,7 +14,9 @@ def label_from_pattern(pattern_str: str) -> str:
     HUD's settings panel (e.g. r"^\\s*Notice\\." -> "Notice."). Only needs
     to handle the simple literal-text-plus-escaped-punctuation patterns
     actually used in config/settings.py's VOICE_LINES, not arbitrary regex."""
-    label = pattern_str.lstrip("^").replace(r"\s*", " ").strip()
+    label = pattern_str.replace(r"(?:^|(?<=[.!?]\s)|(?<=\n))", "")  # SENTENCE_START
+    label = label.replace("[sz]", "s")
+    label = label.lstrip("^").replace(r"\s*", " ").strip()
     for escaped, plain in ((r"\.", "."), (r"\,", ","), (r"\!", "!"), (r"\?", "?")):
         label = label.replace(escaped, plain)
     return label.strip()

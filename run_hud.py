@@ -565,16 +565,22 @@ def _configure_logging() -> None:
     """Writes to great_sage_hud.log (readable after the fact, since this
     runs as a detached GUI window with no visible console) and echoes to
     stdout too, in case that IS being captured somewhere."""
+    handlers = [
+        logging.FileHandler(LOG_PATH, mode="a", encoding="utf-8"),
+        # Buffers from here on, so the HUD's LOGS console can show
+        # what happened before it was opened.
+        HistoryLogHandler(),
+    ]
+    # Under pythonw there is no console: sys.stdout is None. A handler on it
+    # fails every record, and logging's error report then quotes the source
+    # line to a cp1252 stderr - a line holding Japanese text raised from
+    # inside that report and took startup down with it.
+    if sys.stdout is not None:
+        handlers.insert(1, logging.StreamHandler(sys.stdout))
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-        handlers=[
-            logging.FileHandler(LOG_PATH, mode="a", encoding="utf-8"),
-            logging.StreamHandler(sys.stdout),
-            # Buffers from here on, so the HUD's LOGS console can show
-            # what happened before it was opened.
-            HistoryLogHandler(),
-        ],
+        handlers=handlers,
     )
 
 
@@ -582,6 +588,41 @@ def _build_voice(provider=None):
     log = logging.getLogger(__name__)
     if not settings.VOICE_ENABLED:
         return None
+    if getattr(settings, "APP_MODE", "full") == "companion":
+        # Recorded clips only: no torch, no TTS model, no translator.
+        from great_sage.voice.clip_voice import ClipVoiceOutput
+        log.info("Coding Agent Companion: clip voice only (no TTS model loaded)")
+        return ClipVoiceOutput(
+            voice_lines=build_voice_lines(),
+            disabled_voice_line_patterns=build_disabled_voice_line_patterns(),
+        )
+    if settings.VOICE_ENGINE == "xtts_ja":
+        from great_sage.core import hud_settings
+        from great_sage.voice.japanese_tts_engine import JapaneseVoiceOutput
+        # Its own provider instance: translation wants temperature 0 and no
+        # thinking, and must not follow the chat model when that is changed.
+        translator = OllamaProvider(
+            host=settings.OLLAMA_HOST,
+            model=settings.JAPANESE_TRANSLATE_MODEL,
+            timeout=240,
+            think=False,
+            options={"temperature": 0, "num_predict": 4096},
+        )
+        translator.base_num_ctx = settings.JAPANESE_TRANSLATE_NUM_CTX
+        translator.keep_alive = settings.JAPANESE_TRANSLATOR_KEEP_ALIVE_SECONDS
+        return JapaneseVoiceOutput(
+            settings.JAPANESE_REFERENCE_AUDIO_PATH,
+            settings.JAPANESE_MODEL_DIR,
+            translator,
+            voice_lines=build_voice_lines(),
+            disabled_voice_line_patterns=build_disabled_voice_line_patterns(),
+            glossary_path=settings.JAPANESE_GLOSSARY_PATH,
+            summary_threshold=settings.JAPANESE_SUMMARY_THRESHOLD,
+            summary_sentences=settings.JAPANESE_SUMMARY_SENTENCES,
+            autocast=settings.JAPANESE_AUTOCAST,
+            streaming=getattr(settings, "JAPANESE_STREAMING", True),
+            translate=bool(hud_settings.load(settings.HUD_SETTINGS_PATH).get("voice_translate", True)),
+        )
     if settings.VOICE_ENGINE not in ("pocket", "f5"):
         log.warning(
             "VOICE_ENGINE=%r isn't supported by the HUD app (only 'pocket' "
@@ -640,8 +681,13 @@ def main() -> int:
     try:
         provider.get_available_models()
     except ModelProviderError as exc:
-        logging.getLogger(__name__).error("Startup error: %s", exc)
-        return 1
+        if getattr(settings, "APP_MODE", "full") != "companion":
+            logging.getLogger(__name__).error("Startup error: %s", exc)
+            return 1
+        # The Companion's job is the coding agents; Great Sage's own chat is
+        # extra, and simply waits for Ollama if it is ever used.
+        logging.getLogger(__name__).info("Ollama not reachable (%s) - chat is off "
+                                         "until it is; the Companion runs without it", exc)
 
     engine = ChatEngine(
         provider,
