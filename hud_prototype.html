@@ -1667,6 +1667,46 @@ body.mini #mini-chat::after {
 body.mini #mini-chat.sub-enter::after { animation: subtitleCue 900ms ease-out both; }
 body.mini #mini-chat-link { display: none !important; }
 
+/* Rolling subtitle rows (see showSubtitleRow): up to three, newest at the
+   bottom, older ones a touch dimmer; each collapses away on its own so the
+   rest glide up rather than jump. */
+body.mini #mini-chat .mini-chat-label,
+body.mini #mini-chat #mini-chat-text { display: none; }
+body.mini #mini-chat { font-size: 11.5px; padding-top: 8px; padding-bottom: 8px; }
+body.mini #mini-chat::after { display: none; }
+body.mini #mini-chat .sub-rows { display: flex; flex-direction: column; gap: 3px; }
+body.mini #mini-chat .sub-row {
+  position: relative;
+  overflow: hidden;
+  max-height: 6em;
+  transition: max-height 300ms ease, opacity 300ms ease, transform 300ms ease, filter 300ms ease;
+}
+body.mini #mini-chat .sub-row:not(:last-child) { opacity: 0.74; }
+body.mini #mini-chat .sub-row.sub-enter { animation: subtitleIn 300ms ease-out both; }
+body.mini #mini-chat .sub-row.sub-enter::after {
+  content: '';
+  position: absolute;
+  left: 22%; right: 22%; bottom: 0;
+  height: 1px;
+  background: linear-gradient(90deg, transparent, rgba(160, 215, 255, 0.95), transparent);
+  animation: subtitleCue 900ms ease-out both;
+}
+body.mini #mini-chat .sub-row.sub-leave {
+  max-height: 0;
+  opacity: 0;
+  transform: translateY(-6px);
+  filter: blur(2px);
+}
+body.mini #mini-chat .sub-tag {
+  display: block;
+  margin-bottom: 1px;
+  font: 700 7.5px/1.2 "Segoe UI", sans-serif;
+  letter-spacing: 2.2px;
+  color: rgba(165, 215, 255, 1);
+  text-shadow: 1px 0 0 #000, -1px 0 0 #000, 0 1px 0 #000, 0 -1px 0 #000, 0 0 6px rgba(0, 0, 0, 0.95);
+}
+body.mini #mini-chat .sub-line { display: block; }
+
 /* Activity rows: a fade from dark to clear instead of a solid box, a slim
    status bar, a status dot that pulses while the session works, and the
    agent's name in its own colour. */
@@ -1874,7 +1914,7 @@ body.mini:hover #mini-exit { opacity: 1; }
      whatever angle the bubble ends up on. -->
 <svg id="mini-chat-link" class="mini-keep" aria-hidden="true"></svg>
 <div id="agent-activity" class="mini-keep" aria-live="polite"></div>
-<div id="mini-chat" class="mini-keep"><span class="mini-chat-label">大賢者</span><span id="mini-chat-text"></span></div>
+<div id="mini-chat" class="mini-keep"><span class="mini-chat-label">大賢者</span><span id="mini-chat-text"></span><div class="sub-rows"></div></div>
 
 <div id="core-pole"></div>
 
@@ -5823,12 +5863,10 @@ const MINI_CHAT_PAD = 3;
   // never one paragraph: it is split at sentences (then commas) and only
   // its opening lines are shown. When lines pile up they are held for
   // less, and routine lines are dropped before replies.
-  const SUB_MAX_CHARS = 90;
+  const SUB_MAX_CHARS = 70;
   const SUB_QUEUE_MAX = 8;
   const SUB_FADE_MS = 300;
   const subQueue = [];
-  let subShowing = false;
-  let subTimer = null;
 
   function subtitleLines(text, maxLines) {
     const clean = String(text || '').replace(/\s+/g, ' ').trim();
@@ -5854,6 +5892,16 @@ const MINI_CHAT_PAD = 3;
     return lines;
   }
 
+  // Rolling rows: up to SUB_VISIBLE lines on screen, newest at the bottom.
+  // Each line enters on its own, lives for its own hold, and leaves on its
+  // own; a new line past the limit retires the oldest early. Lines are
+  // released at least SUB_GAP_MS apart so a burst still reads in rhythm.
+  const SUB_VISIBLE = 3;
+  const SUB_GAP_MS = 700;
+  const subRows = [];          // { item, el, timer, leaving }
+  let subLastShown = 0;
+  let subPump = null;
+
   function queueSubtitle(text, label, opts) {
     if (!captionEnabled) return;
     const options = opts || {};
@@ -5861,10 +5909,7 @@ const MINI_CHAT_PAD = 3;
       line, label: label || '大賢者', keep: !!options.keep || !!options.audio, audio: !!options.audio,
     }));
     if (options.audio) {
-      // The caption of a clip that is starting NOW: it goes first, and a
-      // note on screen gives way to it at once.
-      subQueue.unshift(...items);
-      if (subShowing && subCurrent && !subCurrent.audio) exitSubtitle();
+      subQueue.unshift(...items);   // the clip starting now goes first
     } else {
       subQueue.push(...items);
     }
@@ -5872,7 +5917,16 @@ const MINI_CHAT_PAD = 3;
       const routine = subQueue.findIndex((item) => !item.keep);
       subQueue.splice(routine >= 0 ? routine : 0, 1);
     }
-    if (!subShowing) nextSubtitle();
+    pumpSubtitles(!!options.audio);
+  }
+
+  function pumpSubtitles(now) {
+    clearTimeout(subPump);
+    if (!subQueue.length) return;
+    const wait = now ? 0 : SUB_GAP_MS - (Date.now() - subLastShown);
+    if (wait > 0) { subPump = setTimeout(() => pumpSubtitles(false), wait); return; }
+    showSubtitleRow(subQueue.shift());
+    if (subQueue.length) subPump = setTimeout(() => pumpSubtitles(false), SUB_GAP_MS);
   }
 
   function subtitleHold(line) {
@@ -5887,66 +5941,68 @@ const MINI_CHAT_PAD = 3;
       || speechStreams.size > 0;
   }
 
-  let subCurrent = null;
-
-  function exitSubtitle() {
-    clearTimeout(subTimer);
-    const { box } = miniChatEls();
-    if (!miniMode || !box) { nextSubtitle(); return; }
-    box.classList.remove('sub-enter');
-    box.classList.add('sub-exit');
-    subTimer = setTimeout(() => {
-      box.classList.remove('sub-exit');
-      nextSubtitle();
-    }, SUB_FADE_MS);
-  }
-
-  // A clip's caption stays until its audio has finished (plus a beat),
-  // however short its text: the line must not leave before the voice does.
-  function holdThenExit(item, hold, waited) {
-    subTimer = setTimeout(() => {
-      if (item.audio && speechSounding() && waited < 20000) {
-        holdThenExit(item, 200, waited + hold);
-        return;
-      }
-      if (item.audio && hold === 200) {
-        subTimer = setTimeout(exitSubtitle, 350);   // the beat after the voice
-        return;
-      }
-      exitSubtitle();
-    }, hold);
-  }
-
-  function nextSubtitle() {
-    clearTimeout(subTimer);
-    const item = subQueue.shift();
-    subCurrent = item || null;
-    if (!item) {
-      subShowing = false;
-      if (miniMode) hideMiniChat();
-      return;
-    }
-    subShowing = true;
-    const hold = subtitleHold(item.line);
+  function showSubtitleRow(item) {
+    subLastShown = Date.now();
     if (!miniMode) {
       // The main HUD shows the same lines through its own caption style.
       showCaption(item.line);
-      holdThenExit(item, hold, 0);
       return;
     }
-    const { box, link, text: span } = miniChatEls();
-    if (!box || !span) { subShowing = false; return; }
-    const label = box.querySelector('.mini-chat-label');
-    if (label) label.textContent = item.label;
-    span.textContent = item.line;
-    box.classList.remove('sub-exit', 'sub-enter');
+    const { box, link } = miniChatEls();
+    const rows = box && box.querySelector('.sub-rows');
+    if (!rows) return;
+    const el = document.createElement('div');
+    el.className = 'sub-row sub-enter';
+    const above = subRows.filter((r) => !r.leaving).pop();
+    if (!above || above.item.label !== item.label) {
+      const tag = document.createElement('span');
+      tag.className = 'sub-tag';
+      tag.textContent = item.label;
+      el.appendChild(tag);
+    }
+    const words = document.createElement('span');
+    words.className = 'sub-line';
+    words.textContent = item.line;
+    el.appendChild(words);
+    rows.appendChild(el);
+    const row = { item, el, timer: null, leaving: false };
+    subRows.push(row);
     box.classList.add('show');
-    if (link) link.classList.add('show');
-    void box.offsetWidth;              // restart the entrance animation
-    box.classList.add('sub-enter');
-    setHostHitRegion(true);            // the bubble sits outside the core
+    if (link) link.classList.remove('show');
+    setHostHitRegion(true);
     placeMiniChat();
-    holdThenExit(item, hold, 0);
+    const live = subRows.filter((r) => !r.leaving);
+    if (live.length > SUB_VISIBLE) retireSubtitleRow(live[0]);
+    holdRow(row, subtitleHold(item.line), 0);
+  }
+
+  // A clip's caption stays until its audio has finished (plus a beat).
+  function holdRow(row, hold, waited) {
+    row.timer = setTimeout(() => {
+      if (row.item.audio && speechSounding() && waited < 20000) {
+        holdRow(row, 200, waited + hold);
+        return;
+      }
+      if (row.item.audio && hold === 200) {
+        row.timer = setTimeout(() => retireSubtitleRow(row), 350);
+        return;
+      }
+      retireSubtitleRow(row);
+    }, hold);
+  }
+
+  function retireSubtitleRow(row) {
+    if (row.leaving) return;
+    row.leaving = true;
+    clearTimeout(row.timer);
+    row.el.classList.remove('sub-enter');
+    row.el.classList.add('sub-leave');
+    setTimeout(() => {
+      row.el.remove();
+      const at = subRows.indexOf(row);
+      if (at >= 0) subRows.splice(at, 1);
+      if (!subRows.length && !subQueue.length && miniMode) hideMiniChat();
+    }, SUB_FADE_MS + 60);
   }
 
   // Older callers (speech captions) feed the same queue.
