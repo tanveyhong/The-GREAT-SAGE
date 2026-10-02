@@ -582,6 +582,28 @@ def _build_voice(provider=None):
     log = logging.getLogger(__name__)
     if not settings.VOICE_ENABLED:
         return None
+    if settings.VOICE_ENGINE == "xtts_ja":
+        from great_sage.voice.japanese_tts_engine import JapaneseVoiceOutput
+        # Its own provider instance: translation wants temperature 0 and no
+        # thinking, and must not follow the chat model when that is changed.
+        translator = OllamaProvider(
+            host=settings.OLLAMA_HOST,
+            model=settings.JAPANESE_TRANSLATE_MODEL,
+            timeout=240,
+            think=False,
+            options={"temperature": 0, "num_predict": 4096},
+        )
+        return JapaneseVoiceOutput(
+            settings.JAPANESE_REFERENCE_AUDIO_PATH,
+            settings.JAPANESE_MODEL_DIR,
+            translator,
+            voice_lines=build_voice_lines(),
+            disabled_voice_line_patterns=build_disabled_voice_line_patterns(),
+            glossary_path=settings.JAPANESE_GLOSSARY_PATH,
+            summary_threshold=settings.JAPANESE_SUMMARY_THRESHOLD,
+            summary_sentences=settings.JAPANESE_SUMMARY_SENTENCES,
+            autocast=settings.JAPANESE_AUTOCAST,
+        )
     if settings.VOICE_ENGINE not in ("pocket", "f5"):
         log.warning(
             "VOICE_ENGINE=%r isn't supported by the HUD app (only 'pocket' "

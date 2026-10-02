@@ -16,7 +16,7 @@ from great_sage.models.base import Message, ModelProvider, ModelProviderError
 
 class OllamaProvider(ModelProvider):
     def __init__(self, host: str, model: str, timeout: int = 60,
-                 think: bool = False):
+                 think: bool = False, options: dict = None):
         """think=False disables a reasoning model's private deliberation.
 
         This matters enormously for a spoken assistant. Ollama reports a
@@ -40,6 +40,9 @@ class OllamaProvider(ModelProvider):
         self.model = model
         self.timeout = timeout
         self.think = think
+        # Extra Ollama sampling options (e.g. temperature 0 for the voice
+        # translator, which wants the same rendering every time).
+        self.options = dict(options or {})
         # Deliberately above Ollama's 4096 default; see _needed_ctx. The
         # KV cache grows with this, so it is raised where it is needed
         # rather than pinned high for every request.
@@ -61,7 +64,7 @@ class OllamaProvider(ModelProvider):
         body = {"model": self.model, "messages": messages, "stream": stream}
         if self.think is not None:
             body["think"] = self.think
-        body["options"] = {"num_ctx": self._needed_ctx(messages)}
+        body["options"] = {**self.options, "num_ctx": self._needed_ctx(messages)}
         if self.keep_alive is not None:
             body["keep_alive"] = self.keep_alive
         return body

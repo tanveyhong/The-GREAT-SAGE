@@ -113,3 +113,10 @@ class BrowserAudioSink(AudioSink):
 
     def stop(self) -> None:
         self._ack_event.set()  # unblock any pending wait so speak() can return
+        # And silence the clip already playing in the page. Not awaited:
+        # stop() can be called from the event loop's own thread.
+        try:
+            asyncio.run_coroutine_threadsafe(
+                self._websocket.send(json.dumps({"type": "stop_audio"})), self._loop)
+        except Exception:
+            pass  # best-effort; the connection may already be gone

@@ -610,6 +610,28 @@ VOICE_ID = None
 # ("clone" engine) wants 15-30s instead.
 CLONE_REFERENCE_AUDIO_PATH = os.path.join("voice_samples", "my_voice_clean.wav")
 
+# --- Japanese voice (VOICE_ENGINE = "xtts_ja") --------------------------
+# English on screen, Japanese out loud: each reply is translated through a
+# ModelProvider, then spoken by XTTS-v2. These paths are set by the local
+# launcher; the rest are the voice's tuning.
+JAPANESE_REFERENCE_AUDIO_PATH = os.path.join("voice_samples", "great_sage_japanese.wav")
+JAPANESE_MODEL_DIR = os.path.join(".model-cache", "xtts-v2")
+# Ollama model used only for translation. A bigger model translates better
+# but costs VRAM alongside XTTS's ~1.9GB on an 8GB card.
+JAPANESE_TRANSLATE_MODEL = os.environ.get("GREAT_SAGE_TRANSLATE_MODEL", OLLAMA_DEFAULT_MODEL)
+# Optional {"English": "カタカナ"} additions to the built-in glossary.
+JAPANESE_GLOSSARY_PATH = "voice_glossary.json"
+# Relayed Claude/Codex replies longer than this (characters of prose) are
+# spoken as a short summary instead of in full. 0 always speaks in full.
+JAPANESE_SUMMARY_THRESHOLD = 700
+JAPANESE_SUMMARY_SENTENCES = 3
+# Half-precision maths during synthesis: measured 2.2x faster (2.7s vs 6.0s
+# for 5.7s of audio) on the RTX 5060. Weights stay fp32 - converting them
+# breaks XTTS's layer norms - so it saves time, not VRAM.
+JAPANESE_AUTOCAST = True
+# Stops whatever is being said, from any window. "" disables it.
+STOP_SPEECH_HOTKEY = os.environ.get("GREAT_SAGE_STOP_HOTKEY", "alt+2")
+
 # --- F5-TTS (VOICE_ENGINE = "f5") --------------------------------------
 # Reference clip to clone. A "<name>.txt" sidecar holding that clip's
 # transcript is optional but preferred - without one, F5 transcribes the

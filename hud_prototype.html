@@ -6575,13 +6575,16 @@ const MINI_CHAT_PAD = 3;
     const voiceLineAudio = el;   // the rest of this function acts on it
     voiceLineAudio.src = url;
     voiceLineAudio.currentTime = 0;
+    voiceLineAudio.stoppedBySpeechKey = false;
 
     // Exactly one ack per clip. Python clears its wait flag before each
     // send, so a duplicate arriving late would unblock the NEXT clip
     // early and cut it off - hence the latch rather than a bare send.
     let acked = false;
     const ack = () => {
-      if (acked) return;
+      // A clip the stop key silenced must not ack: that would land on the
+      // NEXT clip's wait and cut it short.
+      if (acked || voiceLineAudio.stoppedBySpeechKey) return;
       acked = true;
       // The url is NOT revoked here. Each element releases its own
       // previous url on its next use instead, which stays correct whether
@@ -6639,7 +6642,12 @@ const MINI_CHAT_PAD = 3;
 
   function handleServerMessage(event) {
     const msg = JSON.parse(event.data);
-    if (msg.type === 'reply_chunk') {
+    if (msg.type === 'codex_voice_start') {
+      replyBuffer = '';
+      spokenSoFar = '';
+      speechInProgress = true;
+      aiThinking = false;
+    } else if (msg.type === 'reply_chunk') {
       speechInProgress = true;
       replyBuffer += msg.text;
       if (captionFollowsSpeech) {
@@ -6666,6 +6674,13 @@ const MINI_CHAT_PAD = 3;
         renderHistory();
         saveChats();
         maybeNameChat(currentTopic());
+      }
+    } else if (msg.type === 'stop_audio') {
+      // The stop-speech key. Silence both speech elements now; the server
+      // has already stopped waiting on their acks and sends speaking_done.
+      for (const el of [voiceLineAudio, voiceLineAudioB]) {
+        el.stoppedBySpeechKey = true;
+        el.pause();
       }
     } else if (msg.type === 'audio') {
       // The words in THIS clip, revealed as it starts playing, so the

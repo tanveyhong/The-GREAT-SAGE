@@ -911,6 +911,48 @@ async def run_server(engine, voice) -> None:
     # viewer that never sends "chat" at all.
     active_connection = {"websocket": None, "sink": None}
 
+    # Voice-only mirror of completed replies from the configured Codex chat
+    # and the newest Claude desktop session. The relays never submit prompts;
+    # the voice may translate locally. One lock, so the two never overlap.
+    relay_speech_lock = threading.Lock()
+
+    def _speak_relay_reply(text):
+        with relay_speech_lock:
+            return _speak_relayed_reply(text)
+
+    def _speak_relayed_reply(text):
+        ws = active_connection['websocket']
+        sink = active_connection['sink']
+        if voice is None or ws is None or sink is None:
+            return False
+        def send(payload):
+            asyncio.run_coroutine_threadsafe(
+                ws.send(json.dumps(payload)), loop).result(timeout=10)
+        try:
+            voice.set_sink(sink)
+            send({'type': 'codex_voice_start'})
+            if hasattr(voice, 'speak_codex'):
+                voice.speak_codex(text)
+            elif hasattr(voice, 'speak_stream'):
+                voice.speak_stream(iter([text]))
+            else:
+                voice.speak(text)
+            log.info('Voice relay finished speaking %d characters', len(text))
+        except Exception:
+            log.exception('Could not speak relayed reply')
+            # Do not replay a partially spoken reply automatically.
+        finally:
+            try:
+                send({'type': 'speaking_done'})
+            except Exception:
+                pass
+        return True
+
+    from great_sage.core.codex_voice import CodexVoiceRelay
+    codex_voice_relay = CodexVoiceRelay(_speak_relay_reply)
+    from great_sage.core.claude_voice import ClaudeVoiceRelay
+    claude_voice_relay = ClaudeVoiceRelay(_speak_relay_reply)
+
     # Every live connection that could receive a voice reply, by role.
     # Needed because the slot has to FALL BACK, not empty itself: closing
     # an overlay while the HUD is still open used to leave nowhere to
@@ -1172,6 +1214,26 @@ async def run_server(engine, voice) -> None:
             _hotkey.start()
         except Exception:
             log.exception("Global hotkey unavailable")
+
+    # Stop-speech key: silences whatever is being said and drops relayed
+    # replies still waiting their turn. Nothing else is interrupted.
+    def _stop_speech():
+        codex_voice_relay.clear()
+        claude_voice_relay.clear()
+        if voice is not None:
+            voice.stop()
+        log.info("Stop-speech key pressed")
+
+    _stop_hotkey = None
+    if getattr(settings, "STOP_SPEECH_HOTKEY", ""):
+        try:
+            from great_sage.core.global_hotkey import GlobalHotkey
+            _stop_hotkey = GlobalHotkey(settings.STOP_SPEECH_HOTKEY, _stop_speech)
+            if not _stop_hotkey.start():
+                log.warning("Stop-speech key %s could not be registered",
+                            settings.STOP_SPEECH_HOTKEY)
+        except Exception:
+            log.exception("Stop-speech key unavailable")
 
     def _get_wake_phrases():
         saved = hud_settings.load(settings.HUD_SETTINGS_PATH)
@@ -1701,4 +1763,10 @@ async def run_server(engine, voice) -> None:
     # on image size is applied in the page before sending.
     async with websockets.serve(handler, HOST, PORT, max_size=16 * 1024 * 1024):
         log.info("WebSocket bridge listening on ws://%s:%s", HOST, PORT)
-        await asyncio.Future()  # run until the process exits
+        codex_voice_relay.start()
+        claude_voice_relay.start()
+        try:
+            await asyncio.Future()  # run until the process exits
+        finally:
+            codex_voice_relay.stop()
+            claude_voice_relay.stop()
