@@ -1612,6 +1612,86 @@ body.mini #agent-activity .agent-row.idle { opacity: 0; }
 body.mini #agent-activity .agent-row[data-kind="ask"] { border-left-color: rgba(255, 196, 92, 0.95); }
 body.mini #agent-activity .agent-row[data-kind="result"][data-text="Tests failed"] { border-left-color: rgba(255, 110, 110, 0.95); }
 body.mini #agent-activity .agent-row[data-kind="done"] { border-left-color: rgba(120, 230, 160, 0.95); }
+
+/* ---- Overlay text, refined --------------------------------------------
+   The bottom text is a SUBTITLE, not a chat box: no panel, no border, no
+   connector to the core - centred white type along the bottom edge with a
+   dark outline that reads on any desktop, a small speaker tag above it,
+   and a thin glowing cue line drawn out from the centre as a line enters.
+   These override the bubble rules above (same specificity, later). */
+body.mini #mini-chat {
+  left: 10px; right: 10px; bottom: 10px; top: auto;
+  max-width: none;
+  padding: 0 2px 4px;
+  background: none;
+  border: 0;
+  clip-path: none;
+  box-shadow: none;
+  text-align: center;
+  font: 600 12.5px/1.38 "Segoe UI Variable Text", "Segoe UI", sans-serif;
+  letter-spacing: 0.1px;
+  color: #ffffff;
+  text-shadow: 0 0 1px #000, 0 0 2px #000, 0 1px 3px rgba(0, 0, 0, 0.95),
+               0 0 9px rgba(0, 0, 0, 0.75);
+}
+body.mini #mini-chat .mini-chat-label {
+  display: block;
+  margin: 0 0 3px;
+  text-align: center;
+  font: 700 7.5px/1 "Segoe UI", sans-serif;
+  letter-spacing: 2.2px;
+  color: rgba(150, 205, 255, 0.95);
+  text-shadow: 0 0 2px #000, 0 0 6px rgba(0, 0, 0, 0.9), 0 0 8px rgba(120, 190, 255, 0.5);
+}
+@keyframes subtitleCue {
+  0%   { transform: scaleX(0); opacity: 0; }
+  35%  { opacity: 1; }
+  100% { transform: scaleX(1); opacity: 0.35; }
+}
+body.mini #mini-chat::after {
+  inset: auto 22% 0 22%;
+  height: 1px;
+  background: linear-gradient(90deg, transparent, rgba(160, 215, 255, 0.95), transparent);
+  transform: scaleX(0);
+  opacity: 0;
+}
+body.mini #mini-chat.sub-enter::after { animation: subtitleCue 900ms ease-out both; }
+body.mini #mini-chat-link { display: none !important; }
+
+/* Activity rows: a fade from dark to clear instead of a solid box, a slim
+   status bar, a status dot that pulses while the session works, and the
+   agent's name in its own colour. */
+body.mini #agent-activity { gap: 4px; }
+body.mini #agent-activity .agent-row {
+  position: relative;
+  padding: 3px 12px 4px 15px;
+  background: linear-gradient(90deg, rgba(4, 8, 14, 0.86) 0%, rgba(4, 8, 14, 0.6) 60%,
+                              rgba(4, 8, 14, 0) 100%);
+  clip-path: none;
+  box-shadow: none;
+}
+@keyframes agentPulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.3; } }
+body.mini #agent-activity .agent-row::before {
+  content: '';
+  position: absolute;
+  left: 6px; top: 50%;
+  width: 5px; height: 5px;
+  margin-top: -2.5px;
+  border-radius: 50%;
+  color: rgba(140, 200, 255, 0.95);
+  background: currentColor;
+  box-shadow: 0 0 6px currentColor;
+  animation: agentPulse 1.6s ease-in-out infinite;
+}
+body.mini #agent-activity .agent-row[data-kind="ask"]::before { color: rgba(255, 196, 92, 0.95); }
+body.mini #agent-activity .agent-row[data-text="Tests failed"]::before { color: rgba(255, 110, 110, 0.95); }
+body.mini #agent-activity .agent-row[data-kind="done"]::before {
+  color: rgba(120, 230, 160, 0.95);
+  animation: none;
+}
+body.mini #agent-activity .agent-row[data-agent="claude"] .agent-head { color: rgba(236, 164, 124, 0.95); }
+body.mini #agent-activity .agent-row[data-agent="codex"] .agent-head { color: rgba(143, 227, 199, 0.95); }
+body.mini #agent-activity .agent-text { font-size: 10.5px; }
 body.mini #agent-activity .agent-head {
   display: block;
   font: 600 7.5px/1.2 "Segoe UI", sans-serif;
@@ -5719,38 +5799,11 @@ const MINI_CHAT_PAD = 3;
   }
 
   function placeMiniChat() {
+    // A subtitle: the CSS pins it along the bottom edge, with no connector
+    // to the core - clear anything the old bubble placement left inline.
     const { box, link } = miniChatEls();
-    if (!box || !link || !box.classList.contains('show')) return;
-    const vw = window.innerWidth, vh = window.innerHeight;
-
-    // Which half of the screen is the overlay sitting in? Compare the
-    // window's centre against the screen's, and put the bubble on the
-    // opposite side - that is the side with room.
-    let sx = 0, sy = 0, sw = 0, sh = 0;
-    try {
-      sx = window.screenX; sy = window.screenY;
-      sw = window.screen.availWidth || window.screen.width;
-      sh = window.screen.availHeight || window.screen.height;
-    } catch (err) { /* fall through to the centred default below */ }
-    const onRight = sw ? (sx + vw / 2) > sw / 2 : false;
-    const onBottom = sh ? (sy + vh / 2) > sh / 2 : false;
-
-    const w = box.offsetWidth, h = box.offsetHeight;
-    // Toward the screen centre: hug the opposite edge of the window.
-    const left = onRight ? MINI_CHAT_PAD : vw - w - MINI_CHAT_PAD;
-    const top = onBottom ? MINI_CHAT_PAD : vh - h - MINI_CHAT_PAD;
-    box.style.left = left + 'px';
-    box.style.top = top + 'px';
-
-    // Connector: from the bubble's core-facing corner back to the core.
-    const cx = vw / 2, cy = vh / 2;
-    const ax = onRight ? left + w : left;          // anchor on the inner edge
-    const ay = top + h / 2;
-    link.setAttribute('viewBox', `0 0 ${vw} ${vh}`);
-    link.innerHTML =
-      `<line x1="${ax.toFixed(1)}" y1="${ay.toFixed(1)}" `
-      + `x2="${cx.toFixed(1)}" y2="${cy.toFixed(1)}"/>`
-      + `<circle cx="${ax.toFixed(1)}" cy="${ay.toFixed(1)}" r="1.8"/>`;
+    if (box) { box.style.left = ''; box.style.top = ''; }
+    if (link) link.innerHTML = '';
   }
 
   // ---- Subtitles -------------------------------------------------------
@@ -5877,13 +5930,9 @@ const MINI_CHAT_PAD = 3;
     // Opposite edge to the bubble, using the same screen-half test as
     // placeMiniChat: the bubble sits at the top when the overlay is in the
     // lower half of the screen, so the activity line goes to the bottom.
-    let onBottom = false;
-    try {
-      const sh = window.screen.availHeight || window.screen.height;
-      onBottom = sh ? (window.screenY + window.innerHeight / 2) > sh / 2 : false;
-    } catch (err) { /* keep the top edge */ }
-    box.style.top = onBottom ? '' : '4px';
-    box.style.bottom = onBottom ? '4px' : '';
+    // The subtitle owns the bottom edge, so the activity rows take the top.
+    box.style.top = '4px';
+    box.style.bottom = '';
   }
 
   function renderAgentActivity() {
@@ -5901,6 +5950,7 @@ const MINI_CHAT_PAD = 3;
       row.className = 'agent-row' + (now - item.at > AGENT_ACTIVITY_IDLE_MS ? ' idle' : '');
       row.dataset.kind = item.kind;
       row.dataset.text = item.text;
+      row.dataset.agent = String(item.agent || '').toLowerCase();
       const head = document.createElement('span');
       head.className = 'agent-head';
       head.textContent = item.agent + ' · ' + item.session;
