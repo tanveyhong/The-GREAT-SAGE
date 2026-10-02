@@ -45,6 +45,8 @@ def tool_events(record):
     output, so both are read out of the text."""
     payload = record.get('payload') or {}
     kind = payload.get('type')
+    if record.get('type') == 'event_msg' and kind == 'turn_aborted':
+        return [('interrupted',)]  # Master stopped the turn.
     if record.get('type') != 'response_item':
         return []
     if kind in ('custom_tool_call', 'function_call'):

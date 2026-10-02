@@ -20,7 +20,7 @@ import re
 import threading
 import time
 
-from great_sage.core.agent_scenarios import ScenarioTracker
+from great_sage.core.agent_scenarios import ScenarioTracker, greeting, note_scenario
 from great_sage.core.progress_cues import STALE_SECONDS, CueTracker, record_age
 from great_sage.voice.speakable import speakable, cap_for_speech
 
@@ -251,14 +251,21 @@ class SessionRelay:
 
     def _scenes(self, session, parsed):
         scenes = session.scenes
+        names = []
         if parsed.prompt:
             scenes.prompt()
-        names = [scenes.tool(call_id, phase) for call_id, phase in parsed.phases]
+            # The greeting after a long break, otherwise "target confirmed".
+            names.append(greeting() or scenes.acknowledge())
+        if parsed.narration:
+            names.append(scenes.note(note_scenario(parsed.narration)))
+        names += [scenes.tool(call_id, phase) for call_id, phase in parsed.phases]
         for event in parsed.events:
             if event[0] == 'result':
                 names.append(scenes.result(event[1], event[2]))
             elif event[0] == 'ask':
                 names.append(scenes.ask())
+            elif event[0] == 'interrupted':
+                names.append(scenes.interrupted())
         for name in filter(None, names):
             self.scenario(name, False)
         if parsed.reply:

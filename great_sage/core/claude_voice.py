@@ -30,7 +30,19 @@ def user_prompt(record):
                            if isinstance(b, dict) and b.get('type') == 'text')
     if not isinstance(content, str) or not content.strip() or content.lstrip().startswith('<'):
         return None
+    if content.lstrip().startswith('[Request interrupted'):
+        return None  # Master stopped the turn; see interrupted().
     return content.strip()
+
+
+def interrupted(record):
+    """Master stopped Claude mid-turn."""
+    if record.get('type') != 'user':
+        return False
+    content = (record.get('message') or {}).get('content')
+    if isinstance(content, list):
+        content = ' '.join(b.get('text', '') for b in content if isinstance(b, dict))
+    return isinstance(content, str) and content.lstrip().startswith('[Request interrupted')
 
 
 def tool_events(record):
@@ -165,7 +177,7 @@ class ClaudeVoiceRelay(SessionRelay):
         return Parsed(prompt=user_prompt(record),
                       reply=completed_reply(record, ''),
                       narration=narration(record),
-                      events=tool_events(record),
+                      events=tool_events(record) + ([('interrupted',)] if interrupted(record) else []),
                       steps=tool_steps(record),
                       folder=record.get('cwd'),
                       phases=tool_phases(record))

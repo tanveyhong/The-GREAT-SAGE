@@ -36,6 +36,8 @@ LEAD_IN = int(0.15 * RATE)
 # Streaming (see _speak_items_streamed). XTTS yields audio every this many
 # GPT tokens; smaller starts sooner but sends more, shorter chunks.
 STREAM_CHUNK_TOKENS = 20
+# Speaking rate matched to the recorded voice lines (see make_agent_clips.SPEED).
+XTTS_SPEED = 1.12
 PIECE_GAP = np.zeros(int(0.1 * RATE), dtype=np.float32)   # between XTTS pieces
 CACHED_CHUNK = int(0.5 * RATE)          # cached audio is re-sent in this size
 STREAM_TAIL_SECONDS = 0.3               # silence that lets the reverb ring out
@@ -238,7 +240,7 @@ class JapaneseVoiceOutput(F5TTSVoiceOutput):
             with torch.inference_mode(), precision:
                 result = self._model.inference(
                     piece, lang, *self._conditioning,
-                    enable_text_splitting=True, temperature=0.65)
+                    enable_text_splitting=True, temperature=0.65, speed=XTTS_SPEED)
             wav = result['wav']
             wav = wav.float().cpu().numpy() if torch.is_tensor(wav) else wav
             samples.extend([np.asarray(wav, dtype=np.float32), np.zeros(2400, dtype=np.float32)])
@@ -301,7 +303,7 @@ class JapaneseVoiceOutput(F5TTSVoiceOutput):
         with torch.inference_mode(), precision:
             for chunk in self._model.inference_stream(
                     piece, lang, *self._conditioning,
-                    stream_chunk_size=STREAM_CHUNK_TOKENS, temperature=0.65,
+                    stream_chunk_size=STREAM_CHUNK_TOKENS, temperature=0.65, speed=XTTS_SPEED,
                     enable_text_splitting=False):
                 if self._stop_requested:
                     return

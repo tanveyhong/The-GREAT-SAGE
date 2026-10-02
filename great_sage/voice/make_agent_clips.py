@@ -22,8 +22,14 @@ from great_sage.config import settings
 from great_sage.core.agent_scenarios import CATALOGUE, CLIP_DIR
 
 RATE = 24000
+# XTTS speaking rate, matched to the real recordings by measurement
+# (2026-10-02): recorded lines speak a median 7.50 mora/s; XTTS gave 6.12
+# at speed 1.00 (82%, the slowness Master heard), 7.83 at 1.15. 1.12
+# interpolates to the recordings' pace.
+SPEED = 1.12
 ROOT = Path(__file__).resolve().parents[2]
-OPENERS = {'koku': ROOT / 'voice_lines' / 'koku.ogg', 'kai': ROOT / 'voice_lines' / 'kai.ogg'}
+OPENERS = {'koku': ROOT / 'voice_lines' / 'koku.ogg', 'kai': ROOT / 'voice_lines' / 'kai.ogg',
+           'kidou': ROOT / 'voice_lines' / 'kidou.ogg'}
 
 
 def _load(path):
@@ -68,13 +74,25 @@ def main():
     openers = {key: _load(path) for key, path in OPENERS.items()}
 
     for name, i, opener, ja in todo:
-        with torch.inference_mode():
-            wav = model.inference(ja, 'ja', *latents, temperature=0.6, enable_text_splitting=True)['wav']
-        speech = wav.float().cpu().numpy() if torch.is_tensor(wav) else np.asarray(wav, dtype=np.float32)
         parts = [_silence(0.15)]
+        if ja.startswith('@'):
+            # A real recording, used as-is: no opener, no synthesis.
+            audio = np.concatenate([_silence(0.15), _load(ROOT / 'voice_lines' / f'{ja[1:]}.ogg'), _silence(0.3)])
+            out = CLIP_DIR / f'{name}_{i}.wav'
+            sf.write(str(out), audio / max(float(np.max(np.abs(audio))) or 1.0, 1.0), RATE, subtype='PCM_16')
+            print(f'{out.name}: {len(audio) / RATE:.1f}s  recorded {ja[1:]}.ogg')
+            continue
         if opener:
-            parts += [openers[opener], _silence(0.12)]
-        parts += [speech, _silence(0.3)]
+            parts.append(openers[opener])
+        if ja:  # An empty line is the recorded opener alone (the greeting).
+            with torch.inference_mode():
+                wav = model.inference(ja, 'ja', *latents, temperature=0.6, speed=SPEED,
+                                      enable_text_splitting=True)['wav']
+            speech = wav.float().cpu().numpy() if torch.is_tensor(wav) else np.asarray(wav, dtype=np.float32)
+            if opener:
+                parts.append(_silence(0.12))
+            parts.append(speech)
+        parts.append(_silence(0.3))
         audio = np.concatenate(parts)
         peak = float(np.max(np.abs(audio))) or 1.0
         out = CLIP_DIR / f'{name}_{i}.wav'
