@@ -21,6 +21,30 @@ def completed_reply(record):
     return payload.get('turn_id') or record.get('timestamp'), text
 
 
+def user_prompt(record):
+    """The text Master typed into Codex, or None for injected context."""
+    payload = record.get('payload') or {}
+    if (record.get('type') != 'response_item' or payload.get('type') != 'message'
+            or payload.get('role') != 'user'):
+        return None
+    text = ' '.join(block.get('text', '') for block in payload.get('content') or ()
+                    if isinstance(block, dict) and block.get('type') == 'input_text').strip()
+    # Environment context, app events and question replies arrive as tags.
+    return text if text and not text.startswith('<') else None
+
+
+_QUESTION_START = re.compile(
+    r'^(what|why|how|is|are|was|were|can|could|does|do|did|should|which|who|'
+    r'where|when|will|would|shall|has|have)\b', re.IGNORECASE)
+
+
+def opener(prompt):
+    """Great Sage's two openers: 解 "Answer." for a question, else 告 "Notice."."""
+    if prompt and ('?' in prompt or _QUESTION_START.match(prompt)):
+        return 'Answer.'
+    return 'Notice.'
+
+
 def speech_text(text, limit=6000):
     # Coding stays visible in Codex; only prose is useful as spoken feedback.
     text = re.sub(r'(?ms)^\s*(`{3,}|~{3,})[^\n]*\n.*?^\s*\1\s*$', '', text)
@@ -53,6 +77,7 @@ class CodexVoiceRelay:
         self.offset = 0
         self.pending = []
         self.seen = set()
+        self.last_prompt = None
 
     def start(self):
         self.thread.start()
@@ -84,14 +109,19 @@ class CodexVoiceRelay:
             self.offset = 0
         for record, self.offset in new_records(path, self.offset):
             try:
+                prompt = user_prompt(record)
                 reply = completed_reply(record)
             except AttributeError:
                 continue
+            if prompt:
+                self.last_prompt = prompt
             if reply and reply[0] not in self.seen:
                 self.seen.add(reply[0])
                 spoken = speech_text(reply[1], cfg.get('max_chars', 6000))
                 if spoken:
-                    self.pending.append(spoken)
+                    # The voice drops this when the reply already opens
+                    # with a clip phrase of its own.
+                    self.pending.append(f'{opener(self.last_prompt)} {spoken}')
         if len(self.pending) > 1:
             # Replies that piled up while one was spoken are stale by now.
             log.info('Voice relay skipping %d older replies', len(self.pending) - 1)

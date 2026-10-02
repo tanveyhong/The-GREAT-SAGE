@@ -1553,30 +1553,46 @@ body.mini #canvas-wrap canvas {
 body.mini #mini-chat {
   position: fixed;
   display: none;
-  max-width: 168px;
-  padding: 7px 9px;
-  font: 500 10px/1.45 "Consolas", "Cascadia Mono", monospace;
-  color: #f0f7ff;
-  /* Near-black at 90%, so the desktop reads faintly through it without
-     the text losing contrast - 10% see-through, as asked. */
-  background: rgba(4, 7, 12, 0.90);
-  /* White outline rather than the blue-grey used elsewhere: against an
-     arbitrary desktop a tinted border disappears on some wallpapers. */
-  border: 1px solid rgba(255, 255, 255, 0.72);
+  max-width: 184px;
+  padding: 7px 10px 8px 12px;
+  /* A subtitle, not a terminal: a UI face reads faster than monospace at
+     this size, and the slight tracking keeps 11px legible on any desktop. */
+  font: 500 11px/1.5 "Segoe UI Variable Text", "Segoe UI", sans-serif;
+  letter-spacing: 0.15px;
+  color: #eef6ff;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.8);
+  /* Near-black at ~90%, so the desktop reads faintly through it without
+     the text losing contrast. The faint blue lift at the top ties it to
+     the core's glow. */
+  background:
+    linear-gradient(180deg, rgba(40, 70, 105, 0.35), rgba(40, 70, 105, 0) 60%),
+    rgba(4, 7, 12, 0.90);
+  /* A light outline rather than a tinted one: against an arbitrary
+     desktop a tinted border disappears on some wallpapers. Softer than
+     pure white, with the accent bar carrying the colour instead. */
+  border: 1px solid rgba(225, 238, 255, 0.42);
+  border-left: 2px solid rgba(140, 200, 255, 0.95);
   border-radius: 0;
-  /* Cut corners instead of a radius - the same angular treatment the rest
-     of the HUD's panels use, which reads as "pixel" cut rather than a
-     soft rounded box. */
+  /* Cut corners - the same angular treatment as the HUD's panels. */
   clip-path: polygon(6px 0, 100% 0, 100% calc(100% - 6px),
                      calc(100% - 6px) 100%, 0 100%, 0 6px);
-  box-shadow: 0 3px 12px rgba(0, 0, 0, 0.7);
+  box-shadow: 0 3px 14px rgba(0, 0, 0, 0.7), inset 0 0 12px rgba(120, 180, 255, 0.10);
   z-index: 45;
   opacity: 0;
-  transition: opacity 200ms ease;
+  transform: translateY(3px);
+  transition: opacity 220ms ease, transform 220ms ease;
   pointer-events: none;   /* never steals a drag or a core click */
-  overflow-wrap: anywhere;
+  overflow-wrap: break-word;
 }
-body.mini #mini-chat.show { display: block; opacity: 1; }
+body.mini #mini-chat.show { display: block; opacity: 1; transform: none; }
+body.mini #mini-chat .mini-chat-label {
+  display: block;
+  margin-bottom: 3px;
+  font: 600 8.5px/1 "Segoe UI", sans-serif;
+  letter-spacing: 2px;
+  color: rgba(150, 205, 255, 0.85);
+  text-shadow: 0 0 6px rgba(120, 190, 255, 0.6);
+}
 
 body.mini #mini-chat-link {
   position: fixed;
@@ -1697,7 +1713,7 @@ body.mini:hover #mini-exit { opacity: 1; }
      triangle because it has to reach from the bubble back to the core at
      whatever angle the bubble ends up on. -->
 <svg id="mini-chat-link" class="mini-keep" aria-hidden="true"></svg>
-<div id="mini-chat" class="mini-keep"><span id="mini-chat-text"></span></div>
+<div id="mini-chat" class="mini-keep"><span class="mini-chat-label">大賢者</span><span id="mini-chat-text"></span></div>
 
 <div id="core-pole"></div>
 
@@ -5635,7 +5651,9 @@ const MINI_CHAT_PAD = 3;
       + `<circle cx="${ax.toFixed(1)}" cy="${ay.toFixed(1)}" r="1.8"/>`;
   }
 
-  function showMiniChat(text) {
+  // holdMs: a subtitle for speech stays up until speaking_done hides it
+  // (with this as the backstop), instead of vanishing mid-clip at 9s.
+  function showMiniChat(text, holdMs) {
     const { box, link, text: span } = miniChatEls();
     if (!box || !span) return;
     span.textContent = text;
@@ -5646,8 +5664,14 @@ const MINI_CHAT_PAD = 3;
     // the bubble lands a few pixels off.
     placeMiniChat();
     clearTimeout(miniChatTimer);
-    miniChatTimer = setTimeout(hideMiniChat, MINI_CHAT_MS);
+    miniChatTimer = setTimeout(hideMiniChat, Math.max(MINI_CHAT_MS, holdMs || 0));
   }
+  // Fade the subtitle shortly after the voice finishes.
+  function releaseMiniChat(afterMs) {
+    clearTimeout(miniChatTimer);
+    miniChatTimer = setTimeout(hideMiniChat, afterMs);
+  }
+  window.__releaseMiniChat = releaseMiniChat;
 
   function hideMiniChat() {
     const { box, link } = miniChatEls();
@@ -6688,7 +6712,13 @@ const MINI_CHAT_PAD = 3;
       if (captionFollowsSpeech && msg.text) {
         aiThinking = false;
         spokenSoFar = spokenSoFar ? spokenSoFar + ' ' + msg.text : msg.text;
-        showCaption(spokenSoFar);
+        if (miniMode) {
+          // The overlay bubble is a subtitle: just the words being said
+          // now. The whole reply so far grew into a block over the core.
+          if (captionEnabled) window.__showMiniChat(msg.text, 60000);
+        } else {
+          showCaption(spokenSoFar);
+        }
       }
       if (sfxToggle.checked) {
         playServerAudio(msg.data, msg.mime);
@@ -6698,6 +6728,7 @@ const MINI_CHAT_PAD = 3;
         ws.send(JSON.stringify({ type: 'audio_ended' }));
       }
     } else if (msg.type === 'speaking_done') {
+      if (miniMode && window.__releaseMiniChat) window.__releaseMiniChat(2500);
       // Safety net for a reply that was never voiced at all - voice
       // disabled, SFX off, or synthesis failed - so the text still
       // reaches the screen instead of the reply finishing invisibly.

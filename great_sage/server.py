@@ -926,8 +926,11 @@ async def run_server(engine, voice) -> None:
         if voice is None or ws is None or sink is None:
             return False
         def send(payload):
+            # Whichever window holds the voice route NOW: the reply may have
+            # moved between the HUD and the overlay while it was spoken.
+            current = active_connection['websocket'] or ws
             asyncio.run_coroutine_threadsafe(
-                ws.send(json.dumps(payload)), loop).result(timeout=10)
+                current.send(json.dumps(payload)), loop).result(timeout=10)
         try:
             voice.set_sink(sink)
             send({'type': 'codex_voice_start'})

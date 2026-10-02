@@ -5,7 +5,7 @@ from pathlib import Path
 import threading
 import time
 
-from great_sage.core.codex_voice import new_records, speech_text
+from great_sage.core.codex_voice import new_records, opener, speech_text
 
 log = logging.getLogger(__name__)
 CONFIG = Path(__file__).resolve().parents[2] / 'claude_voice.json'
@@ -15,6 +15,21 @@ DEFAULTS = {
     'entrypoint': 'claude-desktop',  # '' speaks CLI sessions too.
     'max_chars': 6000,
 }
+
+
+def user_prompt(record):
+    """The text Master typed, or None for tool results and system notices."""
+    if record.get('type') != 'user' or record.get('isSidechain') or record.get('isMeta'):
+        return None
+    content = (record.get('message') or {}).get('content')
+    if isinstance(content, list):
+        if any(isinstance(b, dict) and b.get('type') == 'tool_result' for b in content):
+            return None
+        content = ' '.join(b.get('text', '') for b in content
+                           if isinstance(b, dict) and b.get('type') == 'text')
+    if not isinstance(content, str) or not content.strip() or content.lstrip().startswith('<'):
+        return None
+    return content.strip()
 
 
 def completed_reply(record, entrypoint='claude-desktop'):
@@ -59,6 +74,7 @@ class ClaudeVoiceRelay:
         self.path = None
         self.pending = []
         self.seen = set()
+        self.last_prompt = None
 
     def start(self):
         self.thread.start()
@@ -113,6 +129,9 @@ class ClaudeVoiceRelay:
             self.offsets[path] = 0
         for record, self.offsets[path] in new_records(path, self.offsets[path]):
             try:
+                prompt = user_prompt(record)
+                if prompt:
+                    self.last_prompt = prompt
                 reply = completed_reply(record, cfg.get('entrypoint', ''))
             except AttributeError:
                 continue
@@ -120,7 +139,9 @@ class ClaudeVoiceRelay:
                 self.seen.add(reply[0])
                 spoken = speech_text(reply[1], cfg.get('max_chars', 6000))
                 if spoken:
-                    self.pending.append(spoken)
+                    # The voice drops this when the reply already opens
+                    # with a clip phrase of its own.
+                    self.pending.append(f'{opener(self.last_prompt)} {spoken}')
         if len(self.pending) > 1:
             # Replies that piled up while one was spoken are stale by now.
             log.info('Voice relay skipping %d older replies', len(self.pending) - 1)

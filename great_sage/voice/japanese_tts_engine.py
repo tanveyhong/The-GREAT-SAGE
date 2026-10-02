@@ -9,13 +9,14 @@ import gc
 import logging
 import queue
 import threading
+import time
 from pathlib import Path
 
 import numpy as np
 import torch
 
 from great_sage.models.base import ModelProviderError
-from great_sage.voice.f5_tts_engine import F5TTSVoiceOutput
+from great_sage.voice.f5_tts_engine import F5TTSVoiceOutput, _pad_tail
 from great_sage.voice.audio_fx import VoiceFX
 from great_sage.voice.sinks import LocalSpeakerSink
 from great_sage.voice.base import VoiceError
@@ -126,7 +127,11 @@ class JapaneseVoiceOutput(F5TTSVoiceOutput):
         if not self._memory_logged:
             self._memory_logged = True
             _log_memory('after first synthesis')
-        return (np.concatenate(samples) if samples else np.zeros(1, dtype=np.float32)), 24000
+        if not samples:
+            return np.zeros(1, dtype=np.float32), 24000
+        # The same tail F5 gets: room for the last syllable and the reverb
+        # to ring out before the next clip starts.
+        return _pad_tail(np.concatenate(samples), 24000), 24000
 
     def _plan(self, text):
         """Ordered ('audio', path, words) and ('text', english) items. Clip
@@ -205,9 +210,7 @@ class JapaneseVoiceOutput(F5TTSVoiceOutput):
                 setattr(self._sink, 'pending_text', caption)
                 if kind == 'file':
                     log.info('Playing Japanese voice line: %s', Path(payload).name)
-                    self._play_audio_file(payload)
-                else:
-                    self._play(*payload)
+                self._play_surviving_switch(kind, payload, caption)
         except BaseException:
             self._stop_requested = True  # Wind the workers down with us.
             raise
@@ -221,6 +224,24 @@ class JapaneseVoiceOutput(F5TTSVoiceOutput):
         if failure:
             raise VoiceError(f'Japanese speech failed: {failure[0]}') from failure[0]
 
+    def _play_surviving_switch(self, kind, payload, caption):
+        """Play one clip; if its window closes under it, replay it on the
+        window the voice route moves to. Switching between the HUD and the
+        overlay closes one page while the other takes over, and used to
+        abandon the rest of the reply there."""
+        sink = self._sink
+        try:
+            return self._play_audio_file(payload) if kind == 'file' else self._play(*payload)
+        except VoiceError:
+            deadline = time.monotonic() + 3
+            while self._sink is sink and time.monotonic() < deadline and not self._stop_requested:
+                time.sleep(0.1)
+            if self._sink is sink or self._stop_requested:
+                raise
+        log.info('Voice moved to another window; replaying the interrupted clip')
+        setattr(self._sink, 'pending_text', caption)
+        return self._play_audio_file(payload) if kind == 'file' else self._play(*payload)
+
     def speak(self, text):
         if not text.strip():
             return
@@ -233,7 +254,12 @@ class JapaneseVoiceOutput(F5TTSVoiceOutput):
         Notice cue, and is summarised when it is long."""
         self._stop_requested = False
         self.fx.begin_utterance()
-        starts_with_clip = any(pattern.match(text) for pattern, _ in self._active_voice_lines())
+        lines = self._active_voice_lines()
+        # The relay adds an opener; one the reply chose itself wins.
+        for lead in ('Answer. ', 'Notice. '):
+            if text.startswith(lead) and any(p.match(text[len(lead):]) for p, _ in lines):
+                text = text[len(lead):]
+        starts_with_clip = any(pattern.match(text) for pattern, _ in lines)
         if not starts_with_clip and not text.lstrip().startswith('Notice.'):
             text = 'Notice. ' + text
         items = self._plan(text)

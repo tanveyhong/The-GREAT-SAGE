@@ -125,8 +125,26 @@ HIT_ALL_SENTINEL = "GS_HIT_ALL"
 HIT_CORE_SENTINEL = "GS_HIT_CORE"
 
 
+def _no_frame_area(event_type, message):
+    """nativeEvent hook: answer WM_NCCALCSIZE with "the client area is the
+    whole window", so the 1px frame WS_BORDER brings has no width and
+    nothing is painted there. The style bit - the part the flicker fix
+    needs - is left set. Returns nativeEvent's (handled, result) pair."""
+    if bytes(event_type) != b"windows_generic_MSG":
+        return False, 0
+    import ctypes.wintypes as wt
+    msg = wt.MSG.from_address(int(message))
+    if msg.message == 0x0083 and msg.wParam:  # WM_NCCALCSIZE, sizing pass
+        return True, 0
+    return False, 0
+
+
 class OverlayView(QWebEngineView):
     """Frameless, always-on-top, transparent, dragged by its handle."""
+
+    def nativeEvent(self, event_type, message):
+        handled, result = _no_frame_area(event_type, message)
+        return (True, result) if handled else super().nativeEvent(event_type, message)
 
     def __init__(self, size: int):
         super().__init__()
@@ -348,6 +366,10 @@ PANEL_BUTTONS_W = 96
 class PanelView(QWebEngineView):
     """A settings/history window: opaque, frameless, its own chrome."""
 
+    def nativeEvent(self, event_type, message):
+        handled, result = _no_frame_area(event_type, message)
+        return (True, result) if handled else super().nativeEvent(event_type, message)
+
     def __init__(self, section: str):
         super().__init__()
         self.setWindowFlags(Qt.FramelessWindowHint)
@@ -410,9 +432,12 @@ def _apply_ws_border(win) -> bool:
     symptom. WS_BORDER must be applied AFTER show(), because Qt sets the
     style itself when the window is created and would overwrite it.
 
-    Nothing is drawn by this on a frameless translucent window - the style
-    bit changes how Windows composites it, not what it paints. Failure is
-    non-fatal: worst case the flicker stays.
+    The style bit changes how Windows composites the window. It also gives
+    the window a 1px frame, which Windows painted as a light rectangle round
+    the transparent overlay (measured: edge 130-168 against 30-90 beside
+    it, gone with the style off). _no_frame_area() keeps the style and
+    sizes that frame to nothing. Failure is non-fatal: worst case the
+    flicker stays.
     """
     try:
         import ctypes
