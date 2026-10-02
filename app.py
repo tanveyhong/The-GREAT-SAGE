@@ -65,6 +65,26 @@ def _configure_logging() -> None:
     )
 
 
+def _already_running() -> bool:
+    """Is a Great Sage already serving the HUD port? Two at once fought over
+    the hotkeys and the port, and the second one's windows talked to the
+    first one's server."""
+    import socket
+    try:
+        with socket.create_connection(("127.0.0.1", 8765), timeout=0.5):
+            return True
+    except OSError:
+        return False
+
+
+def _tell(message: str) -> None:
+    try:
+        import ctypes
+        ctypes.windll.user32.MessageBoxW(None, message, "Great Sage", 0x40)
+    except Exception:
+        pass
+
+
 def main() -> int:
     # The transparent overlay runs as its own process, and in a frozen
     # build there is no overlay_window.py to launch - so the exe re-invokes
@@ -74,8 +94,19 @@ def main() -> int:
         import overlay_window
         sys.argv = [a for a in sys.argv if a != "--overlay"]
         return overlay_window.main()
+    # The log console, likewise: the frozen exe runs it for itself. It used
+    # to be launched as "<exe> log_console_client.py", which the exe ignored
+    # - opening the logs started a whole second Great Sage, whose HUD then
+    # took the voice route from the overlay.
+    if "--log-console" in sys.argv:
+        from great_sage import log_console_client
+        return log_console_client.main()
 
     _configure_logging()
+    if _already_running():
+        log.info("Great Sage is already running - not starting a second copy")
+        _tell("Great Sage is already running.")
+        return 0
     log.info("Great Sage starting (frozen=%s, base=%s)",
              getattr(sys, "frozen", False), BASE)
 

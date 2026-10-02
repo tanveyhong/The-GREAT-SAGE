@@ -234,8 +234,13 @@ def _spawn_log_console() -> None:
     console app printing to stdout, but it now opens its own styled
     pywebview window, so a console would just sit there empty behind it.
     """
-    script_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "log_console_client.py")
     creationflags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
+    if getattr(sys, "frozen", False):
+        # The exe has no script to hand a Python; it runs the console itself
+        # (app.py --log-console). Passing a script path started a second app.
+        subprocess.Popen([sys.executable, "--log-console"], creationflags=creationflags)
+        return
+    script_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "log_console_client.py")
     subprocess.Popen([sys.executable, script_path], creationflags=creationflags)
 
 
@@ -1186,9 +1191,11 @@ async def run_server(engine, voice) -> None:
         voice_clients.pop(websocket, None)
         if active_connection["websocket"] is not websocket:
             return
-        # Prefer the HUD; an overlay will do. Anything still open beats
+        # Prefer the overlay: while it is open the main window is hidden, so
+        # captions routed there are never seen (the Companion's subtitles
+        # vanished that way). The HUD will do, and anything still open beats
         # leaving the next voice reply with nowhere to go.
-        for want in ("hud", "overlay"):
+        for want in ("overlay", "hud"):
             for ws_other, (role, sink_other) in voice_clients.items():
                 if role == want:
                     log.info("Voice routing falls back to the %s", role)
