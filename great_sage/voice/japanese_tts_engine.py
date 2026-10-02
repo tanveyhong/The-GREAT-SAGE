@@ -4,12 +4,14 @@ English stays the written language: captions carry the English each clip
 was translated from, while the audio is Japanese. Translation goes through
 a ModelProvider so the translating model can be swapped like any other.
 """
+from collections import OrderedDict
 import contextlib
 import gc
 import logging
 import queue
 import threading
 import time
+import uuid
 from pathlib import Path
 
 import numpy as np
@@ -30,6 +32,38 @@ RATE = 24000
 # of a clip's start (measured), and the HUD starting a new audio element
 # swallows that much - heard as the front of each sentence clipped.
 LEAD_IN = int(0.15 * RATE)
+
+# Streaming (see _speak_items_streamed). XTTS yields audio every this many
+# GPT tokens; smaller starts sooner but sends more, shorter chunks.
+STREAM_CHUNK_TOKENS = 20
+PIECE_GAP = np.zeros(int(0.1 * RATE), dtype=np.float32)   # between XTTS pieces
+CACHED_CHUNK = int(0.5 * RATE)          # cached audio is re-sent in this size
+STREAM_TAIL_SECONDS = 0.3               # silence that lets the reverb ring out
+
+
+# Agents repeat themselves - "Now running the tests.", the same openers -
+# so recent lines skip translation (and, when short, synthesis) entirely.
+TRANSLATION_CACHE_SIZE = 300
+AUDIO_CACHE_SIZE = 64          # ~30MB at most: a few seconds of float32 each
+AUDIO_CACHE_MAX_CHARS = 120    # Japanese characters; longer lines rarely repeat
+
+
+class _LRU(OrderedDict):
+    def __init__(self, size):
+        super().__init__()
+        self.size = size
+
+    def get_recent(self, key):
+        if key in self:
+            self.move_to_end(key)
+            return self[key]
+        return None
+
+    def keep(self, key, value):
+        self[key] = value
+        self.move_to_end(key)
+        while len(self) > self.size:
+            self.popitem(last=False)
 
 
 def _clip_samples(path):
@@ -58,7 +92,7 @@ def _log_memory(label):
 class JapaneseVoiceOutput(F5TTSVoiceOutput):
     def __init__(self, reference_audio_path, model_dir, translator, voice_lines=None,
                  disabled_voice_line_patterns=None, glossary_path=None,
-                 summary_threshold=700, summary_sentences=3, autocast=True):
+                 summary_threshold=700, summary_sentences=3, autocast=True, streaming=True):
         from TTS.tts.configs.xtts_config import XttsConfig
         from TTS.tts.models.xtts import Xtts
         config = XttsConfig()
@@ -84,6 +118,7 @@ class JapaneseVoiceOutput(F5TTSVoiceOutput):
         self.summary_threshold = summary_threshold
         self.summary_sentences = summary_sentences
         self.autocast = autocast and self._cuda
+        self.streaming = streaming
         self.voice_lines = voice_lines or []
         self._disabled_patterns = set(disabled_voice_line_patterns or ())
         self._single_shot = True
@@ -91,6 +126,8 @@ class JapaneseVoiceOutput(F5TTSVoiceOutput):
         self._stop_requested = False
         self.speaking = False
         self.fx = VoiceFX()
+        self._translations = _LRU(TRANSLATION_CACHE_SIZE)  # English -> Japanese
+        self._audio = _LRU(AUDIO_CACHE_SIZE)               # Japanese -> (samples, rate)
         self.warm_up()
 
     def warm_up(self):
@@ -129,11 +166,15 @@ class JapaneseVoiceOutput(F5TTSVoiceOutput):
         english = jt.prepare_english(text, self.glossary)
         if not english:
             return None
+        cached = self._translations.get_recent(english)
+        if cached:
+            return cached
         system = self._translate_prompt
         for attempt in (1, 2):
             translated = jt.fix_japanese(self._ask(system, english), self.glossary)
             problem = jt.problem(english, translated)
             if problem is None:
+                self._translations.keep(english, translated)
                 return translated
             log.warning('Japanese translation rejected (%s), attempt %d: %r',
                         problem, attempt, translated[:120])
@@ -182,7 +223,152 @@ class JapaneseVoiceOutput(F5TTSVoiceOutput):
         return items
 
     def _speak_items(self, items):
+        if self.streaming and getattr(self._sink, 'supports_streaming', False):
+            return self._speak_items_streamed(items)
+        return self._speak_items_clips(items)
+
+    def _translate_into(self, items, out, failure, put):
+        """The translation stage, shared by both ways of speaking: runs ahead
+        on its own thread, passing recorded clips through in order."""
+        try:
+            for kind, payload, *rest in items:
+                if self._stop_requested or failure:
+                    break
+                if kind == 'audio':
+                    put(out, ('file', payload, rest[0]))
+                else:
+                    japanese = self.translate(payload)
+                    if japanese:
+                        log.info('Japanese for %r: %s', payload[:60], japanese[:200])
+                        put(out, ('text', japanese, payload))
+        except BaseException as exc:
+            failure.append(exc)
+        finally:
+            put(out, None)
+
+    def _stream_piece(self, piece):
+        """XTTS audio for one piece (<= the 71-char Japanese limit), chunk by
+        chunk as it is generated."""
+        precision = (torch.autocast('cuda', dtype=torch.float16)
+                     if self.autocast else contextlib.nullcontext())
+        with torch.inference_mode(), precision:
+            for chunk in self._model.inference_stream(
+                    piece, 'ja', *self._conditioning,
+                    stream_chunk_size=STREAM_CHUNK_TOKENS, temperature=0.65,
+                    enable_text_splitting=False):
+                if self._stop_requested:
+                    return
+                yield chunk.float().cpu().numpy() if torch.is_tensor(chunk) \
+                    else np.asarray(chunk, dtype=np.float32)
+
+    def _stream_send(self, samples, stream_id, text, final):
+        """One chunk to the sink; if the window closes under it, send it to
+        the window the voice route moves to and carry on there."""
+        sink = self._sink
+        try:
+            return sink.stream_chunk(samples, RATE, stream_id, text=text, final=final)
+        except Exception as exc:
+            deadline = time.monotonic() + 3
+            while self._sink is sink and time.monotonic() < deadline and not self._stop_requested:
+                time.sleep(0.1)
+            if self._sink is sink or self._stop_requested:
+                raise VoiceError(f'Audio streaming failed: {exc}') from exc
+        log.info('Voice moved to another window; continuing the stream there')
+        return self._sink.stream_chunk(samples, RATE, stream_id, text=text, final=final)
+
+    def _speak_items_streamed(self, items):
+        """Translate ahead on one thread; synthesize with XTTS streaming here,
+        sending each chunk as it is made. The page schedules the chunks back
+        to back, so a reply is one seamless stream: no clip boundaries to
+        clip, and the first sound comes as soon as the first chunk exists."""
+        translated = queue.Queue()
+        failure = []
+
+        def put(target, item):
+            target.put(item)
+
+        worker = threading.Thread(target=self._translate_into, name='japanese-translate',
+                                  args=(items, translated, failure, put), daemon=True)
+        worker.start()
+        stream_id = uuid.uuid4().hex
+        began = time.monotonic()
+        state = {'sent': 0.0, 'first': None, 'caption': None}
+
+        def send(samples, final=False):
+            # The first chunk of each sentence carries its English caption.
+            text, state['caption'] = state['caption'], None
+            self._stream_send(self.fx.apply(samples, RATE), stream_id, text, final)
+            if state['first'] is None:
+                state['first'] = time.monotonic()
+                log.info('Japanese voice: first audio %.1fs after the reply arrived',
+                         state['first'] - began)
+            state['sent'] += len(samples) / RATE
+
+        def send_held(held):
+            for path, words in held:
+                state['caption'] = words
+                send(_clip_samples(path))
+
+        held = []
+        self.speaking = True  # Progress cues stay quiet while this is set.
+        try:
+            while not self._stop_requested:
+                waited = time.monotonic()
+                item = translated.get()
+                waited = time.monotonic() - waited
+                if state['first'] is not None and waited > 0.4 and item is not None:
+                    log.info('Japanese voice waited %.1fs for the next translation', waited)
+                if item is None or failure:
+                    break
+                kind, payload, caption = item
+                if kind == 'file':
+                    # Held, so it flows straight into the sentence after it
+                    # instead of playing alone into silence.
+                    held.append((payload, caption))
+                    continue
+                # One caption for the held clips and this sentence, shown as
+                # the first of them starts.
+                state['caption'] = ' '.join([words for _, words in held] + [caption])
+                for path, _ in held:
+                    send(_clip_samples(path))
+                held = []
+                hit = self._audio.get_recent(payload)
+                if hit is not None:
+                    log.info('Japanese voice reused cached audio for %r', caption[:50])
+                    for start in range(0, len(hit[0]), CACHED_CHUNK):
+                        send(hit[0][start:start + CACHED_CHUNK])
+                    continue
+                made = []
+                for n, piece in enumerate(jt.split_japanese(payload)):
+                    if self._stop_requested:
+                        break
+                    if n:
+                        made.append(PIECE_GAP)
+                        send(PIECE_GAP)
+                    for chunk in self._stream_piece(piece):
+                        made.append(chunk)
+                        send(chunk)
+                if made and len(payload) <= AUDIO_CACHE_MAX_CHARS and not self._stop_requested:
+                    self._audio.keep(payload, (np.concatenate(made), RATE))
+            if not self._stop_requested:
+                send_held(held)  # Clips with no speech after them.
+                # Silence through the effects lets the reverb ring out, and
+                # closes the stream; then wait for the page to finish it.
+                send(np.zeros(int(STREAM_TAIL_SECONDS * RATE), dtype=np.float32), final=True)
+                playing = state['sent'] - (time.monotonic() - (state['first'] or began))
+                self._sink.wait_stream_end(max(0.0, playing))
+        except BaseException:
+            self._stop_requested = True  # Wind the translator down with us.
+            raise
+        finally:
+            self.speaking = False
+            worker.join(timeout=60)
+        if failure:
+            raise VoiceError(f'Japanese speech failed: {failure[0]}') from failure[0]
+
+    def _speak_items_clips(self, items):
         """Three stages, each on its own thread: translate, synthesize, play.
+        Used when the sink cannot stream (local speakers).
 
         Translation runs ahead of synthesis, and synthesis (about twice
         realtime) ahead of playback, so speech starts after the first short
@@ -201,21 +387,7 @@ class JapaneseVoiceOutput(F5TTSVoiceOutput):
                         return
 
         def translate_all():
-            try:
-                for kind, payload, *rest in items:
-                    if self._stop_requested or failure:
-                        break
-                    if kind == 'audio':
-                        put(translated, ('file', payload, rest[0]))
-                    else:
-                        japanese = self.translate(payload)
-                        if japanese:
-                            log.info('Japanese for %r: %s', payload[:60], japanese[:200])
-                            put(translated, ('text', japanese, payload))
-            except BaseException as exc:
-                failure.append(exc)
-            finally:
-                put(translated, None)
+            self._translate_into(items, translated, failure, put)
 
         def synthesize_all():
             # A recorded clip waits for the speech after it and goes out
@@ -232,7 +404,14 @@ class JapaneseVoiceOutput(F5TTSVoiceOutput):
                     if kind == 'file':
                         held.append((payload, caption))
                         continue
-                    samples, rate = self.generate(payload)
+                    hit = self._audio.get_recent(payload)
+                    if hit is not None:
+                        samples, rate = hit
+                        log.info('Japanese voice reused cached audio for %r', caption[:50])
+                    else:
+                        samples, rate = self.generate(payload)
+                        if len(payload) <= AUDIO_CACHE_MAX_CHARS and not self._stop_requested:
+                            self._audio.keep(payload, (samples, rate))
                     if held:
                         try:
                             lead = [_clip_samples(path) for path, _ in held]

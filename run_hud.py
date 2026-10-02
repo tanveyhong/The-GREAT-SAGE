@@ -599,6 +599,8 @@ def _build_voice(provider=None):
             think=False,
             options={"temperature": 0, "num_predict": 4096},
         )
+        translator.base_num_ctx = settings.JAPANESE_TRANSLATE_NUM_CTX
+        translator.keep_alive = settings.JAPANESE_TRANSLATOR_KEEP_ALIVE_SECONDS
         return JapaneseVoiceOutput(
             settings.JAPANESE_REFERENCE_AUDIO_PATH,
             settings.JAPANESE_MODEL_DIR,
@@ -609,6 +611,7 @@ def _build_voice(provider=None):
             summary_threshold=settings.JAPANESE_SUMMARY_THRESHOLD,
             summary_sentences=settings.JAPANESE_SUMMARY_SENTENCES,
             autocast=settings.JAPANESE_AUTOCAST,
+            streaming=getattr(settings, "JAPANESE_STREAMING", True),
         )
     if settings.VOICE_ENGINE not in ("pocket", "f5"):
         log.warning(

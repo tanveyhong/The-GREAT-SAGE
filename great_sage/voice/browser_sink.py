@@ -111,6 +111,36 @@ class BrowserAudioSink(AudioSink):
             pass          # header we cannot read just falls back to the floor
         self._send_and_wait(data, mime, duration)
 
+    # --- Streaming: chunks are sent as XTTS produces them, and the page
+    # schedules them back to back on its AudioContext (see hud_prototype's
+    # playStreamChunk). One ack per STREAM, when its last chunk has played.
+    supports_streaming = True
+
+    def stream_chunk(self, samples, samplerate: int, stream_id: str,
+                     text: str = None, final: bool = False) -> None:
+        """Send one chunk without waiting; `final` closes the stream."""
+        import numpy as np
+
+        pcm = (np.clip(np.asarray(samples, dtype=np.float32), -1.0, 1.0) * 32767).astype('<i2')
+        payload = json.dumps({
+            "type": "audio_chunk",
+            "stream": stream_id,
+            "rate": int(samplerate),
+            "data": base64.b64encode(pcm.tobytes()).decode("ascii") if pcm.size else "",
+            "text": text or "",
+            "final": bool(final),
+        })
+        if final:
+            self._ack_event.clear()  # the ack this stream's end will send
+        asyncio.run_coroutine_threadsafe(self._websocket.send(payload), self._loop).result()
+
+    def wait_stream_end(self, seconds_left: float) -> None:
+        """Block until the page has played the whole stream."""
+        deadline = max(ACK_TIMEOUT_SECONDS, seconds_left + ACK_TIMEOUT_MARGIN_SECONDS)
+        if not self._ack_event.wait(timeout=deadline):
+            raise VoiceError("Timed out waiting for the HUD to finish a speech stream "
+                             "(waited %.0fs)." % deadline)
+
     def stop(self) -> None:
         self._ack_event.set()  # unblock any pending wait so speak() can return
         # And silence the clip already playing in the page. Not awaited:

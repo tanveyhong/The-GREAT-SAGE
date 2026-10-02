@@ -392,7 +392,7 @@ def _apply_voice_provider(voice):
             pass
 
 
-def _apply_mode(engine, cfg, send_json=None):
+def _apply_mode(engine, cfg, send_json=None, voice=None):
     """Put a mode's limits into effect (spec S39/S40).
 
     The one that does real work is GAMING: keep_alive 0 means Ollama drops
@@ -410,6 +410,16 @@ def _apply_mode(engine, cfg, send_json=None):
             # Do not wait for the next reply to finish - the point of the
             # mode is to free the card NOW.
             threading.Thread(target=provider.unload, daemon=True).start()
+    # The Japanese voice's translator is its own provider instance and
+    # follows the same rule: held while coding, gone at once when the mode
+    # wants the GPU back.
+    translator = getattr(voice, "translator", None)
+    if translator is not None and hasattr(translator, "keep_alive"):
+        translator.keep_alive = (
+            getattr(settings, "JAPANESE_TRANSLATOR_KEEP_ALIVE_SECONDS", None)
+            if mode.keep_model_loaded else 0)
+        if not mode.keep_model_loaded and hasattr(translator, "unload"):
+            threading.Thread(target=translator.unload, daemon=True).start()
     log.info("Mode: %s (model resident=%s, hud fps=%s, wake word=%s, "
              "web=%s, online=%s)", mode.label, mode.keep_model_loaded,
              mode.hud_fps or "normal", mode.wake_word, mode.allow_web,
@@ -1193,7 +1203,7 @@ async def run_server(engine, voice) -> None:
             cfg = ai_settings.apply_update(cfg, {"mode": "gaming"})
             ai_settings.save(settings.AI_SETTINGS_PATH, cfg)
             _apply_provider(engine, cfg)
-            _apply_mode(engine, cfg)
+            _apply_mode(engine, cfg, voice=voice)
             log.info("Game detected (%r) - switched to GAMING, will restore "
                      "%s afterwards", title[:60], was.upper())
         else:
@@ -1210,7 +1220,7 @@ async def run_server(engine, voice) -> None:
             cfg = ai_settings.apply_update(cfg, {"mode": back})
             ai_settings.save(settings.AI_SETTINGS_PATH, cfg)
             _apply_provider(engine, cfg)
-            _apply_mode(engine, cfg)
+            _apply_mode(engine, cfg, voice=voice)
             log.info("Game closed - restored %s mode", back.upper())
 
     _watcher = None
@@ -1370,7 +1380,7 @@ async def run_server(engine, voice) -> None:
                 "type": "mode", "mode": _mode.name, "label": _mode.label,
                 "hud_fps": _mode.hud_fps, "wake_word": _mode.wake_word,
                 "description": _mode.description}))
-            _apply_mode(engine, _cfg)
+            _apply_mode(engine, _cfg, voice=voice)
             await websocket.send(json.dumps({
                 "type": "ai_settings",
                 "settings": ai_settings.public_view(
@@ -1529,7 +1539,7 @@ async def run_server(engine, voice) -> None:
                             current, data.get("settings") or {})
                         ai_settings.save(settings.AI_SETTINGS_PATH, merged)
                         _apply_provider(engine, merged)
-                        _m = _apply_mode(engine, merged)
+                        _m = _apply_mode(engine, merged, voice=voice)
                         await websocket.send(json.dumps({
                             "type": "mode", "mode": _m.name,
                             "label": _m.label, "hud_fps": _m.hud_fps,

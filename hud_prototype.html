@@ -6767,6 +6767,103 @@ const MINI_CHAT_PAD = 3;
       });
   }
 
+  // ---- Streamed speech -------------------------------------------------
+  // The Japanese voice sends a reply as a stream of raw 16-bit PCM chunks
+  // while XTTS is still generating. Each chunk is scheduled on the
+  // AudioContext timeline exactly where the previous one ends, so sentences
+  // join with no seam - two <audio> elements taking turns clipped the start
+  // of every clip. A chunk that arrives late starts a moment later: a pause,
+  // never a cut. The stream acks once, when its last chunk has played.
+  const STREAM_LEAD_S = 0.08;        // first chunk: room for scheduling jitter
+  let streamGain = null;
+  const speechStreams = new Map();   // stream id -> { next, sources, stopped }
+
+  function streamOutput() {
+    if (!streamGain) {
+      streamGain = audioCtx.createGain();
+      streamGain.connect(analyser);  // the pulse follows streamed speech too
+    }
+    streamGain.gain.value = voiceLineAudio.volume;  // same volume as clips
+    return streamGain;
+  }
+
+  function pcm16ToBuffer(b64, rate) {
+    const bin = atob(b64);
+    const frames = bin.length >> 1;
+    const buffer = audioCtx.createBuffer(1, Math.max(1, frames), rate);
+    const channel = buffer.getChannelData(0);
+    for (let i = 0; i < frames; i++) {
+      let v = bin.charCodeAt(2 * i) | (bin.charCodeAt(2 * i + 1) << 8);
+      if (v >= 0x8000) v -= 0x10000;
+      channel[i] = v / 32768;
+    }
+    return buffer;
+  }
+
+  function sendStreamAck() {
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ type: 'audio_ended' }));
+    }
+  }
+
+  function scheduleStreamCaption(words, delayMs) {
+    setTimeout(() => {
+      if (!captionFollowsSpeech) return;
+      aiThinking = false;
+      spokenSoFar = spokenSoFar ? spokenSoFar + ' ' + words : words;
+      if (miniMode) {
+        if (captionEnabled) window.__showMiniChat(words, 60000);
+      } else {
+        showCaption(spokenSoFar);
+      }
+    }, delayMs);
+  }
+
+  function playStreamChunk(msg) {
+    let stream = speechStreams.get(msg.stream);
+    if (!stream) {
+      stream = { next: 0, sources: new Set(), stopped: false };
+      speechStreams.set(msg.stream, stream);
+    }
+    if (stream.stopped) return;
+    if (!sfxToggle.checked) {
+      // Sound off: captions still follow, and Python must not hang.
+      if (msg.text) scheduleStreamCaption(msg.text, 0);
+      if (msg.final) { speechStreams.delete(msg.stream); sendStreamAck(); }
+      return;
+    }
+    if (audioCtx.state === 'suspended') audioCtx.resume().catch(() => {});
+    const now = audioCtx.currentTime;
+    if (stream.next < now + 0.02) stream.next = now + STREAM_LEAD_S;
+    const startAt = stream.next;
+    if (msg.data) {
+      const buffer = pcm16ToBuffer(msg.data, msg.rate || 24000);
+      const source = audioCtx.createBufferSource();
+      source.buffer = buffer;
+      source.connect(streamOutput());
+      source.start(startAt);
+      stream.sources.add(source);
+      source.onended = () => stream.sources.delete(source);
+      stream.next = startAt + buffer.duration;
+    }
+    if (msg.text) scheduleStreamCaption(msg.text, Math.max(0, (startAt - now) * 1000));
+    if (msg.final) {
+      const remainingMs = Math.max(0, (stream.next - audioCtx.currentTime) * 1000);
+      setTimeout(() => {
+        if (speechStreams.get(msg.stream) === stream) speechStreams.delete(msg.stream);
+        if (!stream.stopped) sendStreamAck();
+      }, remainingMs + 30);
+    }
+  }
+
+  function stopSpeechStreams() {
+    for (const stream of speechStreams.values()) {
+      stream.stopped = true;
+      stream.sources.forEach((source) => { try { source.stop(); } catch (err) { /* already ended */ } });
+    }
+    speechStreams.clear();
+  }
+
   function handleServerMessage(event) {
     const msg = JSON.parse(event.data);
     if (msg.type === 'codex_voice_start') {
@@ -6802,6 +6899,8 @@ const MINI_CHAT_PAD = 3;
         saveChats();
         maybeNameChat(currentTopic());
       }
+    } else if (msg.type === 'audio_chunk') {
+      playStreamChunk(msg);
     } else if (msg.type === 'agent_activity') {
       if (window.__showAgentActivity) window.__showAgentActivity(msg);
     } else if (msg.type === 'stop_audio') {
@@ -6811,6 +6910,7 @@ const MINI_CHAT_PAD = 3;
         el.stoppedBySpeechKey = true;
         el.pause();
       }
+      stopSpeechStreams();
     } else if (msg.type === 'audio') {
       // The words in THIS clip, revealed as it starts playing, so the
       // caption tracks the voice instead of racing ahead of it.

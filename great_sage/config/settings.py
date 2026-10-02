@@ -619,6 +619,16 @@ JAPANESE_MODEL_DIR = os.path.join(".model-cache", "xtts-v2")
 # Ollama model used only for translation. A bigger model translates better
 # but costs VRAM alongside XTTS's ~1.9GB on an 8GB card.
 JAPANESE_TRANSLATE_MODEL = os.environ.get("GREAT_SAGE_TRANSLATE_MODEL", OLLAMA_DEFAULT_MODEL)
+# Context reserved per translation request. Measured on qwen3.5:4b: a
+# translation needs at most ~420 tokens and a 6000-character summary ~1350;
+# 4096 matches 8192's speed (2.69s median both) and frees ~200MB of VRAM.
+# Keep it constant - a different num_ctx per request makes Ollama reload.
+JAPANESE_TRANSLATE_NUM_CTX = 4096
+# How long the translator stays loaded after its last use. Every
+# translation and every prompt sent to Claude/Codex renews it, so it stays
+# warm while sessions are active and leaves once all have been quiet this
+# long. GAMING and SLEEP still unload it at once.
+JAPANESE_TRANSLATOR_KEEP_ALIVE_SECONDS = 600
 # Optional {"English": "カタカナ"} additions to the built-in glossary.
 JAPANESE_GLOSSARY_PATH = "voice_glossary.json"
 # Relayed Claude/Codex replies longer than this (characters of prose) are
@@ -629,6 +639,10 @@ JAPANESE_SUMMARY_SENTENCES = 3
 # for 5.7s of audio) on the RTX 5060. Weights stay fp32 - converting them
 # breaks XTTS's layer norms - so it saves time, not VRAM.
 JAPANESE_AUTOCAST = True
+# Stream speech to the HUD while XTTS generates it, played gaplessly with
+# Web Audio. False falls back to one clip per sentence through <audio>
+# elements, which start later and can clip the front of each sentence.
+JAPANESE_STREAMING = True
 # Clips for what a relayed Claude/Codex session is doing while it works
 # (great_sage/core/progress_cues.py). progress_cues.json switches them on
 # and off and sets how often "Analysing." may repeat.
