@@ -15,6 +15,7 @@ Subclasses only say where the logs are and how to read one record.
 from collections import OrderedDict
 import json
 import logging
+import os
 from pathlib import Path
 import re
 import threading
@@ -22,6 +23,7 @@ import time
 
 from great_sage.core.agent_scenarios import ScenarioTracker, greeting, note_scenario
 from great_sage.core.progress_cues import STALE_SECONDS, CueTracker, record_age
+from great_sage.core.progress_cues import load_config as load_cues_config
 from great_sage.voice.speakable import speakable, cap_for_speech
 
 log = logging.getLogger(__name__)
@@ -74,6 +76,12 @@ def load_json_config(path, defaults):
     return {**defaults, **cfg}
 
 
+def session_key(path):
+    """One spelling of a session's log path, so a Claude hook's
+    transcript_path finds the same activity row as the relay's own."""
+    return os.path.normcase(os.path.normpath(str(path)))
+
+
 def _created(stat):
     return getattr(stat, 'st_birthtime', stat.st_ctime)
 
@@ -121,6 +129,7 @@ class SessionRelay:
         self.sessions = {}            # path -> _Session
         self.pending = OrderedDict()  # path -> newest unspoken reply
         self.seen = set()
+        self.muted = set()
 
     # --- what a subclass provides ---------------------------------------
     def load_config(self):
@@ -172,6 +181,8 @@ class SessionRelay:
             return
         if time.time() - self.last_scan >= RESCAN_SECONDS:
             self.scan(cfg)
+        # Projects Master muted from the overlay: shown, never voiced.
+        self.muted = set(load_cues_config().get('muted_projects') or ())
         if not cfg.get('enabled'):
             self.pending.clear()
             for path, session in self.sessions.items():
@@ -208,9 +219,10 @@ class SessionRelay:
         if parsed.folder:
             session.label = Path(str(parsed.folder).rstrip('\\/')).name or None
         fresh = record_age(record.get('timestamp')) <= STALE_SECONDS
-        if parsed.prompt and fresh and self.prepare:
+        muted = session.label in self.muted
+        if parsed.prompt and fresh and self.prepare and not muted:
             self.prepare()
-        if fresh and self.scenario:
+        if fresh and self.scenario and not muted:
             self._scenes(session, parsed)
         events = ([('prompt',)] if parsed.prompt else []) + parsed.events
         if parsed.narration:
@@ -221,6 +233,8 @@ class SessionRelay:
             name = session.cues.feed(event, record.get('timestamp'))
             if name in ('succeeded', 'failed'):
                 self._show(session, path, 'result', 'Tests passed' if name == 'succeeded' else 'Tests failed')
+            if muted:
+                continue
             if name == 'narrate':
                 text = speech_text(parsed.narration, NARRATION_CHARS)
                 if text and self.narrate:
@@ -242,6 +256,8 @@ class SessionRelay:
                 self._show(session, path, 'reply', speech_text(parsed.reply[1], 600))
         if parsed.reply and parsed.reply[0] not in self.seen:
             self.seen.add(parsed.reply[0])
+            if muted:
+                return
             spoken = speech_text(parsed.reply[1], cfg.get('max_chars', 6000))
             if spoken:
                 if path in self.pending:
@@ -275,9 +291,10 @@ class SessionRelay:
 
     def _show(self, session, path, kind, text):
         if self.activity and text:
+            label = session.label or path.parent.name
             self.activity({'type': 'agent_activity', 'agent': self.name,
-                           'session': session.label or path.parent.name,
-                           'key': str(path), 'kind': kind, 'text': text})
+                           'session': label, 'key': session_key(path),
+                           'kind': kind, 'text': text, 'muted': label in self.muted})
 
     def run(self):
         while not self.stop_event.is_set():

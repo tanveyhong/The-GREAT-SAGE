@@ -1813,6 +1813,28 @@ body.mini #agent-activity .agent-row[data-kind="done"]::before {
 body.mini #agent-activity .agent-row[data-agent="claude"] .agent-head { color: rgba(236, 164, 124, 0.95); }
 body.mini #agent-activity .agent-row[data-agent="codex"] .agent-head { color: rgba(143, 227, 199, 0.95); }
 body.mini #agent-activity .agent-text { font-size: 10.5px; }
+/* Rows take clicks (the host lets only their strip through): the row
+   opens the agent's app, the speaker button mutes the project. */
+body.mini #agent-activity .agent-row { pointer-events: auto; cursor: pointer; }
+body.mini #agent-activity .agent-row:hover { background: linear-gradient(90deg, rgba(20, 34, 52, 0.92) 0%,
+                                              rgba(20, 34, 52, 0.66) 60%, rgba(20, 34, 52, 0) 100%); }
+body.mini #agent-activity .agent-mute {
+  position: absolute;
+  right: 4px; top: 50%;
+  transform: translateY(-50%);
+  border: 0;
+  background: none;
+  padding: 2px;
+  font-size: 10px;
+  line-height: 1;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 150ms ease;
+}
+body.mini #agent-activity .agent-row:hover .agent-mute,
+body.mini #agent-activity .agent-row.muted .agent-mute { opacity: 0.9; }
+body.mini #agent-activity .agent-row.muted .agent-text,
+body.mini #agent-activity .agent-row.muted .agent-head { opacity: 0.55; }
 body.mini #agent-activity .agent-head {
   display: block;
   font: 600 7.5px/1.2 "Segoe UI", sans-serif;
@@ -5896,13 +5918,6 @@ Hey Ciel</textarea>
   // window.screenX/screenY give the window's own position on the desktop,
   // which is what decides this - the page cannot otherwise know where it
   // is. No Python round trip needed.
-  const MINI_CHAT_MS = 9000;      // how long a reply stays up
-  // Tight to the corner. It used to sit 8px in, which read as floating
-// loose in the middle of nothing once the window became transparent -
-// with no visible window there is no edge for it to relate to except
-// the visuals themselves.
-const MINI_CHAT_PAD = 3;
-  let miniChatTimer = null;
 
   function miniChatEls() {
     return {
@@ -6037,7 +6052,7 @@ const MINI_CHAT_PAD = 3;
     subRows.push(row);
     box.classList.add('show');
     if (link) link.classList.remove('show');
-    setHostHitRegion(true);
+    // Not interactive: the overlay stays click-through around it.
     placeMiniChat();
     const live = subRows.filter((r) => !r.leaving);
     if (live.length > SUB_VISIBLE) retireSubtitleRow(live[0]);
@@ -6146,12 +6161,57 @@ const MINI_CHAT_PAD = 3;
       const text = document.createElement('span');
       text.className = 'agent-text';
       text.textContent = item.text;
-      row.append(head, text);
+      // Mute this project's voice; it stays on the activity line.
+      const muted = mutedProjects.has(item.session);
+      const mute = document.createElement('button');
+      mute.className = 'agent-mute';
+      mute.title = muted ? 'Unmute this project' : 'Mute this project';
+      mute.textContent = muted ? '🔇' : '🔊';
+      mute.addEventListener('click', (event) => {
+        event.stopPropagation();
+        if (ws && ws.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify({ type: 'mute_project', label: item.session, muted: !muted }));
+        }
+      });
+      if (muted) row.classList.add('muted');
+      // Click the row: bring that agent's app to the front.
+      row.title = 'Open ' + item.agent;
+      row.addEventListener('click', () => {
+        if (ws && ws.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify({ type: 'focus_agent', agent: item.agent }));
+        }
+      });
+      row.append(head, text, mute);
       box.append(row);
     }
     placeAgentActivity(box);
+    reportRowsBand(box, rows.length);
     clearTimeout(agentActivityTimer);
     if (agentSessions.size) agentActivityTimer = setTimeout(renderAgentActivity, 1000);
+  }
+
+  const mutedProjects = new Set();
+  window.__setMutedProjects = (names) => {
+    mutedProjects.clear();
+    (names || []).forEach((name) => mutedProjects.add(name));
+    renderAgentActivity();
+  };
+
+  // Tell the overlay host which strip the rows cover, so clicks there reach
+  // them while the rest of the overlay stays click-through. Sent through the
+  // window title, like the other host signals.
+  let lastRowsBand = '';
+  function reportRowsBand(box, count) {
+    if (!IS_STANDALONE_OVERLAY) return;
+    let band = '0,0,0,0';
+    if (count) {
+      const r = box.getBoundingClientRect();
+      band = [r.left, r.top, r.right, r.bottom].map((v) => Math.round(v)).join(',');
+    }
+    if (band === lastRowsBand) return;
+    lastRowsBand = band;
+    document.title = 'GS_HIT_ROWS:' + band;
+    setTimeout(() => { document.title = 'GreatSageOverlay'; }, 50);
   }
 
   window.__showAgentActivity = (msg) => {
@@ -7289,6 +7349,8 @@ const MINI_CHAT_PAD = 3;
         saveChats();
         maybeNameChat(currentTopic());
       }
+    } else if (msg.type === 'mute_state') {
+      if (window.__setMutedProjects) window.__setMutedProjects(msg.muted);
     } else if (msg.type === 'agent_voice_state') {
       // Server-owned switches: reflect them, never echo them back.
       document.querySelectorAll('[data-agent-voice]').forEach((box) => {

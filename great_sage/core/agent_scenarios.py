@@ -182,7 +182,10 @@ _NOTE_SCENARIOS = [
     ('error_seen', r'\b(error|exception|traceback|crash\w*)\b'),
     ('revert', r'\b(revert\w*|roll(ing)? back|undo\w*)\b'),
     ('retry', r'\b(retry\w*|try(ing)? again|another attempt)\b'),
-    ('approval', r'\b(your approval|approve|permission|confirm with you)\b'),
+    # Only notes that are actually WAITING: a note merely mentioning
+    # permission (replayed 2026-10-02) used to trigger this.
+    ('approval', r'\b(needs? your (approval|permission|go-ahead)|waiting (for|on) your (approval|permission|go-ahead)'
+                 r'|before i (proceed|continue|go ahead), (please )?confirm|confirm with you first)\b'),
     ('lint', r'\b(lint\w*|type[- ]?check\w*|phpstan|eslint|mypy|pint|prettier|tsc)\b'),
     ('plan', r'^(plan\w*|first,|the plan|here is the plan)'),
     ('refactor', r'\b(refactor\w*|clean(ing)? up|simplif\w+|extract\w*|renam\w+)\b'),

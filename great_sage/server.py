@@ -152,6 +152,7 @@ import dataclasses
 import json
 import logging
 import os
+from pathlib import Path
 import queue
 import subprocess
 import sys
@@ -968,6 +969,43 @@ async def run_server(engine, voice) -> None:
             return False
         log.info("Coding-agent voice: %s %s", key, "on" if on else "off")
         return True
+
+    # Per-project mute (the overlay's activity rows): kept in
+    # progress_cues.json, which the relays already read every poll.
+    def _mute_state():
+        return {"type": "mute_state",
+                "muted": sorted(_cues_cfg.load_config().get("muted_projects") or [])}
+
+    def _set_project_muted(label, muted):
+        if not label:
+            return
+        cfg = _cues_cfg.load_config()
+        projects = set(cfg.get("muted_projects") or [])
+        (projects.add if muted else projects.discard)(label)
+        cfg["muted_projects"] = sorted(projects)
+        _write_json(_cues_cfg.CONFIG, cfg)
+        log.info("Project %s %s", label, "muted" if muted else "unmuted")
+
+    def _handle_agent_notification(data):
+        from great_sage.core.session_relay import session_key
+        message = str(data.get("message") or "")
+        kind = str(data.get("notification_type") or "")
+        cwd = str(data.get("cwd") or "")
+        label = Path(cwd.rstrip("\\/")).name if cwd else "Claude"
+        permission = kind == "permission_prompt" or "permission" in message.lower()
+        text = message or ("Needs your permission" if permission else "Waiting for your input")
+        _send_activity({"type": "agent_activity", "agent": str(data.get("agent") or "Claude"),
+                        "session": label, "key": session_key(data.get("transcript_path") or cwd),
+                        "kind": "ask", "text": text,
+                        "muted": label in set(_cues_cfg.load_config().get("muted_projects") or [])})
+        log.info("Agent notification (%s): %s", label, text)
+        if not permission or label in set(_cues_cfg.load_config().get("muted_projects") or []):
+            return  # Idle prompts follow a reply that was already announced.
+        # Play off the event loop: playback waits for the page's ack.
+        if _clip_mode():
+            threading.Thread(target=_play_relay_scenario, args=("approval", True), daemon=True).start()
+        else:
+            threading.Thread(target=_play_relay_cue, args=("needs_you",), daemon=True).start()
 
     log_handler = BroadcastLogHandler(loop)
     log_handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s"))
@@ -1804,6 +1842,7 @@ async def run_server(engine, voice) -> None:
                     role = str(data.get("role") or "?")[:40]
                     log.info("Client is the %s", role)
                     await websocket.send(json.dumps(_agent_voice_state()))
+                    await websocket.send(json.dumps(_mute_state()))
                     if role in ("hud", "overlay"):
                         voice_clients[websocket] = (role, sink)
                         _claim_voice_route(websocket, sink)
@@ -1904,6 +1943,23 @@ async def run_server(engine, voice) -> None:
                         saved = hud_settings.load(settings.HUD_SETTINGS_PATH)
                         saved["voice_fx"] = params
                         hud_settings.save(settings.HUD_SETTINGS_PATH, saved)
+                elif msg_type == "agent_notification":
+                    # From the Claude Code Notification hook
+                    # (great_sage/hooks/claude_notify.py): Claude is blocked on
+                    # Master - which never shows in the session log.
+                    _handle_agent_notification(data)
+                elif msg_type == "mute_project":
+                    _set_project_muted(str(data.get("label") or ""), bool(data.get("muted")))
+                    state = json.dumps(_mute_state())
+                    for client in list(all_clients):
+                        try:
+                            await client.send(state)
+                        except Exception:
+                            pass
+                elif msg_type == "focus_agent":
+                    from great_sage.core.window_focus import focus_agent
+                    threading.Thread(target=focus_agent, args=(str(data.get("agent") or ""),),
+                                     daemon=True).start()
                 elif msg_type == "set_agent_voice":
                     if _set_agent_voice(str(data.get("key")), bool(data.get("on"))):
                         # Every open window shows the same switches.

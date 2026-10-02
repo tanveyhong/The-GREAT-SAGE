@@ -123,6 +123,9 @@ CORE_HIT_FRACTION = 0.26
 # open, or the speech bubble is showing. Both extend well past the core.
 HIT_ALL_SENTINEL = "GS_HIT_ALL"
 HIT_CORE_SENTINEL = "GS_HIT_CORE"
+# "GS_HIT_ROWS:left,top,right,bottom" - the activity rows' strip, which takes
+# clicks (open the agent's app, mute a project) while the rest passes through.
+HIT_ROWS_PREFIX = "GS_HIT_ROWS:"
 
 
 def _no_frame_area(event_type, message):
@@ -176,6 +179,9 @@ class OverlayView(QWebEngineView):
         # Click-through state. Starts None so the first poll always
         # applies a style rather than assuming one.
         self._hit_all = False
+        # The activity rows' strip (page px: left, top, right, bottom); clicks
+        # there reach the page while the rest stays click-through.
+        self._rows_band = None
         self._placed = False
         self._click_through = None
         self._ct_timer = QTimer(self)
@@ -192,6 +198,10 @@ class OverlayView(QWebEngineView):
         w, h = self.width(), self.height()
         if not (0 <= x <= w and 0 <= y <= h):
             return False
+        if self._rows_band:
+            left, band_top, right, bottom = self._rows_band
+            if left <= x <= right and band_top <= y <= bottom:
+                return True
         # The drag handle and the exit cross, both top-right.
         hx = w - HANDLE_INSET_RIGHT
         if hx <= x <= hx + HANDLE_W and HANDLE_TOP <= y <= HANDLE_TOP + HANDLE_H:
@@ -255,6 +265,13 @@ class OverlayView(QWebEngineView):
             return
         if title.strip() == HIT_CORE_SENTINEL:
             self._hit_all = False
+            return
+        if title.strip().startswith(HIT_ROWS_PREFIX):
+            try:
+                band = [int(v) for v in title.strip()[len(HIT_ROWS_PREFIX):].split(',')]
+                self._rows_band = tuple(band) if len(band) == 4 and band[3] > band[1] else None
+            except ValueError:
+                self._rows_band = None
             return
         if title.strip() == EXIT_SENTINEL:
             # Exit code 0 tells the launcher this was a deliberate switch
